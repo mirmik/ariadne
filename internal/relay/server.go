@@ -21,6 +21,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/identity"
 	"github.com/mirmik/ariadne/internal/wire"
+	"golang.org/x/crypto/ssh"
 )
 
 type Config struct {
@@ -161,6 +162,8 @@ func (server *Server) handleNodeAction(response http.ResponseWriter, request *ht
 		server.handleExec(response, request, session)
 	case request.Method == http.MethodGet && action == "streams/ssh":
 		server.handleStreamProxy(response, request, session, "ssh")
+	case request.Method == http.MethodGet && action == "streams/shell":
+		server.handleStreamProxy(response, request, session, "shell")
 	default:
 		writeAPIError(response, http.StatusNotFound, "unknown node endpoint")
 	}
@@ -242,6 +245,7 @@ func (server *Server) handleConnector(response http.ResponseWriter, request *htt
 	session := newNodeSession(server, connection, wire.NodeInfo{
 		ID:               hello.NodeID,
 		Alias:            hello.Alias,
+		SSHHostKey:       hello.SSHHostKey,
 		Platform:         hello.Platform,
 		Architecture:     hello.Architecture,
 		ConnectorVersion: hello.ConnectorVersion,
@@ -347,7 +351,28 @@ func readAndValidateHello(ctx context.Context, connection *websocket.Conn) (wire
 	if expected := identity.NodeID(publicKey); hello.NodeID != expected {
 		return wire.Hello{}, nil, fmt.Errorf("node ID does not match public key; expected %s", expected)
 	}
+	if _, err := parseWireSSHKey(hello.SSHHostKey); err != nil {
+		return wire.Hello{}, nil, fmt.Errorf("invalid embedded SSH host key: %w", err)
+	}
 	return hello, publicKey, nil
+}
+
+func parseWireSSHKey(encoded string) (ssh.PublicKey, error) {
+	if encoded == "" {
+		return nil, errors.New("key is required")
+	}
+	if len(encoded) > 1024 {
+		return nil, errors.New("key is too large")
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, errors.New("key is not valid base64")
+	}
+	key, err := ssh.ParsePublicKey(raw)
+	if err != nil || key.Type() != ssh.KeyAlgoED25519 {
+		return nil, errors.New("key must be Ed25519")
+	}
+	return key, nil
 }
 
 func readAndVerifyRegistration(ctx context.Context, connection *websocket.Conn, hello wire.Hello, publicKey ed25519.PublicKey, nonce []byte) error {

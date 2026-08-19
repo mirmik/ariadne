@@ -18,6 +18,10 @@ const (
 	MaxExecOutputBytes    = 1 << 20
 	MaxStreamPayloadSize  = 64 << 10
 	StreamFrameHeaderSize = 18
+
+	HeaderSSHClientKey = "X-Ariadne-SSH-Client-Key"
+	HeaderNodeID       = "X-Ariadne-Node-ID"
+	HeaderSSHHostKey   = "X-Ariadne-SSH-Host-Key"
 )
 
 type MessageType string
@@ -48,6 +52,7 @@ type Hello struct {
 	NodeID           string `json:"node_id"`
 	Alias            string `json:"alias"`
 	PublicKey        string `json:"public_key"`
+	SSHHostKey       string `json:"ssh_host_key"`
 	Platform         string `json:"platform"`
 	Architecture     string `json:"architecture"`
 	ConnectorVersion string `json:"connector_version"`
@@ -68,6 +73,7 @@ type Registered struct {
 type NodeInfo struct {
 	ID               string    `json:"id"`
 	Alias            string    `json:"alias"`
+	SSHHostKey       string    `json:"ssh_host_key"`
 	Platform         string    `json:"platform"`
 	Architecture     string    `json:"architecture"`
 	ConnectorVersion string    `json:"connector_version"`
@@ -97,8 +103,9 @@ type ExecResult struct {
 }
 
 type StreamOpen struct {
-	StreamID string `json:"stream_id"`
-	Protocol string `json:"protocol"`
+	StreamID           string `json:"stream_id"`
+	Protocol           string `json:"protocol"`
+	SSHClientPublicKey string `json:"ssh_client_public_key,omitempty"`
 }
 
 type StreamState struct {
@@ -203,6 +210,7 @@ func RegistrationTranscript(nonce []byte, hello Hello) []byte {
 	transcript = appendField(transcript, []byte(hello.NodeID))
 	transcript = appendField(transcript, []byte(hello.Alias))
 	transcript = appendField(transcript, []byte(hello.PublicKey))
+	transcript = appendField(transcript, []byte(hello.SSHHostKey))
 	transcript = appendField(transcript, []byte(hello.Platform))
 	transcript = appendField(transcript, []byte(hello.Architecture))
 	transcript = appendField(transcript, []byte(hello.ConnectorVersion))

@@ -32,6 +32,11 @@ type HTTPError struct {
 	Message    string
 }
 
+type StreamPeer struct {
+	NodeID     string
+	SSHHostKey string
+}
+
 func (err *HTTPError) Error() string {
 	return fmt.Sprintf("relay returned HTTP %d: %s", err.StatusCode, err.Message)
 }
@@ -98,14 +103,43 @@ func (client *Client) Exec(ctx context.Context, target string, execRequest wire.
 }
 
 func (client *Client) DialStream(ctx context.Context, target, protocol string) (*websocket.Conn, error) {
+	connection, _, err := client.dialStream(ctx, target, protocol, nil)
+	return connection, err
+}
+
+func (client *Client) DialShellStream(ctx context.Context, target, sshClientPublicKey string) (*websocket.Conn, StreamPeer, error) {
+	if sshClientPublicKey == "" {
+		return nil, StreamPeer{}, errors.New("SSH session public key is required")
+	}
+	headers := make(http.Header)
+	headers.Set(wire.HeaderSSHClientKey, sshClientPublicKey)
+	connection, response, err := client.dialStream(ctx, target, "shell", headers)
+	if err != nil {
+		return nil, StreamPeer{}, err
+	}
+	peer := StreamPeer{
+		NodeID:     response.Header.Get(wire.HeaderNodeID),
+		SSHHostKey: response.Header.Get(wire.HeaderSSHHostKey),
+	}
+	if peer.NodeID == "" || peer.SSHHostKey == "" {
+		connection.CloseNow()
+		return nil, StreamPeer{}, errors.New("relay did not identify the shell stream peer")
+	}
+	return connection, peer, nil
+}
+
+func (client *Client) dialStream(ctx context.Context, target, protocol string, extraHeaders http.Header) (*websocket.Conn, *http.Response, error) {
 	if target == "" {
-		return nil, errors.New("target is required")
+		return nil, nil, errors.New("target is required")
 	}
 	if protocol == "" {
-		return nil, errors.New("stream protocol is required")
+		return nil, nil, errors.New("stream protocol is required")
 	}
 	endpoint := client.endpoint("/v1/nodes/" + url.PathEscape(target) + "/streams/" + url.PathEscape(protocol))
-	headers := make(http.Header)
+	headers := extraHeaders.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
 	if client.token != "" {
 		headers.Set("Authorization", "Bearer "+client.token)
 	}
@@ -116,12 +150,12 @@ func (client *Client) DialStream(ctx context.Context, target, protocol string) (
 	})
 	if err != nil {
 		if response != nil {
-			return nil, fmt.Errorf("open %s stream: relay returned HTTP %d: %w", protocol, response.StatusCode, err)
+			return nil, response, fmt.Errorf("open %s stream: relay returned HTTP %d: %w", protocol, response.StatusCode, err)
 		}
-		return nil, fmt.Errorf("open %s stream: %w", protocol, err)
+		return nil, nil, fmt.Errorf("open %s stream: %w", protocol, err)
 	}
 	connection.SetReadLimit(wire.MaxStreamPayloadSize)
-	return connection, nil
+	return connection, response, nil
 }
 
 func (client *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {

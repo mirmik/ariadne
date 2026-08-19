@@ -1,7 +1,9 @@
 package identity
 
 import (
+	"crypto"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -126,6 +128,14 @@ func (identity *Identity) EncodedPublicKey() string {
 func (identity *Identity) Sign(message []byte) string {
 	signature := ed25519.Sign(identity.privateKey, message)
 	return base64.RawStdEncoding.EncodeToString(signature)
+}
+
+// SSHHostSigner returns a stable Ed25519 key that is domain-separated from
+// the node identity key. Rotating the node identity rotates this key as well.
+func (identity *Identity) SSHHostSigner() crypto.Signer {
+	mac := hmac.New(sha256.New, identity.privateKey.Seed())
+	_, _ = mac.Write([]byte("ariadne/ssh-host/v1"))
+	return ed25519.NewKeyFromSeed(mac.Sum(nil))
 }
 
 func ParsePublicKey(encoded string) (ed25519.PublicKey, error) {

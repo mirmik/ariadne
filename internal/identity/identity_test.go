@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"os"
 	"path/filepath"
@@ -57,5 +58,20 @@ func TestSignaturesVerify(t *testing.T) {
 	}
 	if NodeID(parsed) != nodeIdentity.NodeID() {
 		t.Fatal("encoded public key changed the node ID")
+	}
+}
+
+func TestSSHHostSignerIsStableAndSeparatedFromNodeIdentity(t *testing.T) {
+	nodeIdentity, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := nodeIdentity.SSHHostSigner().Public().(ed25519.PublicKey)
+	second := nodeIdentity.SSHHostSigner().Public().(ed25519.PublicKey)
+	if !bytes.Equal(first, second) {
+		t.Fatal("derived SSH host key is not stable")
+	}
+	if bytes.Equal(first, nodeIdentity.PublicKey()) {
+		t.Fatal("SSH host key reuses the node identity key")
 	}
 }

@@ -2,39 +2,49 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/mirmik/ariadne/internal/wire"
+	"golang.org/x/crypto/ssh"
 )
 
 const localStreamQueueDepth = 32
 
 type localStream struct {
-	id      string
-	session *session
-	context context.Context
-	cancel  context.CancelFunc
-	inbound chan []byte
-	done    chan struct{}
+	id            string
+	protocol      string
+	authorizedKey ssh.PublicKey
+	session       *session
+	context       context.Context
+	cancel        context.CancelFunc
+	inbound       chan []byte
+	done          chan struct{}
 
 	connMu sync.Mutex
 	conn   net.Conn
 	once   sync.Once
+
+	readMu     sync.Mutex
+	readBuffer []byte
 }
 
-func newLocalStream(id string, session *session) *localStream {
+func newLocalStream(request wire.StreamOpen, session *session, authorizedKey ssh.PublicKey) *localStream {
 	streamContext, cancel := context.WithCancel(session.context)
 	return &localStream{
-		id:      id,
-		session: session,
-		context: streamContext,
-		cancel:  cancel,
-		inbound: make(chan []byte, localStreamQueueDepth),
-		done:    make(chan struct{}),
+		id:            request.StreamID,
+		protocol:      request.Protocol,
+		authorizedKey: authorizedKey,
+		session:       session,
+		context:       streamContext,
+		cancel:        cancel,
+		inbound:       make(chan []byte, localStreamQueueDepth),
+		done:          make(chan struct{}),
 	}
 }
 
@@ -42,11 +52,23 @@ func (session *session) openStream(request wire.StreamOpen) error {
 	if _, err := wire.EncodeStreamFrame(request.StreamID, nil); err != nil {
 		return session.sendStreamError(request.StreamID, "invalid stream ID")
 	}
-	if request.Protocol != "ssh" {
+	var authorizedKey ssh.PublicKey
+	switch request.Protocol {
+	case "ssh":
+		if request.SSHClientPublicKey != "" {
+			return session.sendStreamError(request.StreamID, "external SSH streams do not accept a session key")
+		}
+	case "shell":
+		var err error
+		authorizedKey, err = parseSSHStreamKey(request.SSHClientPublicKey)
+		if err != nil {
+			return session.sendStreamError(request.StreamID, err.Error())
+		}
+	default:
 		return session.sendStreamError(request.StreamID, "unsupported stream protocol")
 	}
 
-	stream := newLocalStream(request.StreamID, session)
+	stream := newLocalStream(request, session, authorizedKey)
 	session.streamsMu.Lock()
 	if _, exists := session.streams[request.StreamID]; exists {
 		session.streamsMu.Unlock()
@@ -65,17 +87,32 @@ func (session *session) openStream(request wire.StreamOpen) error {
 }
 
 func (stream *localStream) run() {
+	var err error
+	switch stream.protocol {
+	case "ssh":
+		err = stream.runExternalSSH()
+	case "shell":
+		err = stream.runEmbeddedShell()
+	default:
+		err = errors.New("unsupported stream protocol")
+	}
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+		stream.session.connector.config.Logger.Debug("local stream ended", "stream_id", stream.id, "protocol", stream.protocol, "error", err)
+	}
+	stream.finish(true)
+}
+
+func (stream *localStream) runExternalSSH() error {
 	dialer := net.Dialer{Timeout: stream.session.connector.config.DialTimeout}
 	connection, err := dialer.DialContext(stream.context, "tcp", stream.session.connector.config.SSHAddress)
 	if err != nil {
 		select {
 		case <-stream.done:
-			return
+			return io.EOF
 		default:
 		}
 		_ = stream.session.sendStreamError(stream.id, "connect to local sshd: "+err.Error())
-		stream.finish(false)
-		return
+		return err
 	}
 	stream.connMu.Lock()
 	stream.conn = connection
@@ -83,13 +120,12 @@ func (stream *localStream) run() {
 	select {
 	case <-stream.done:
 		_ = connection.Close()
-		return
+		return io.EOF
 	default:
 	}
 
 	if err := stream.session.sendControl(wire.MessageStreamOpened, "", wire.StreamState{StreamID: stream.id}); err != nil {
-		stream.finish(false)
-		return
+		return err
 	}
 	errorChannel := make(chan error, 2)
 	go func() {
@@ -98,11 +134,14 @@ func (stream *localStream) run() {
 	go func() {
 		errorChannel <- stream.writeLocal()
 	}()
-	err = <-errorChannel
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
-		stream.session.connector.config.Logger.Debug("local SSH stream ended", "stream_id", stream.id, "error", err)
+	return <-errorChannel
+}
+
+func (stream *localStream) runEmbeddedShell() error {
+	if err := stream.session.sendControl(wire.MessageStreamOpened, "", wire.StreamState{StreamID: stream.id}); err != nil {
+		return err
 	}
-	stream.finish(true)
+	return stream.session.connector.sshServer.serve(stream.context, &streamConnection{stream: stream}, stream.authorizedKey)
 }
 
 func (stream *localStream) readLocal() error {
@@ -176,6 +215,87 @@ func (session *session) sendStreamError(streamID, message string) error {
 	}
 	return session.sendControl(wire.MessageStreamError, "", wire.StreamState{StreamID: streamID, Message: message})
 }
+
+func parseSSHStreamKey(encoded string) (ssh.PublicKey, error) {
+	if encoded == "" {
+		return nil, errors.New("embedded SSH stream requires a session public key")
+	}
+	if len(encoded) > 1024 {
+		return nil, errors.New("SSH session public key is too large")
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, errors.New("SSH session public key is not valid base64")
+	}
+	key, err := ssh.ParsePublicKey(raw)
+	if err != nil || key.Type() != ssh.KeyAlgoED25519 {
+		return nil, errors.New("SSH session public key must be Ed25519")
+	}
+	return key, nil
+}
+
+type streamConnection struct {
+	stream *localStream
+}
+
+func (connection *streamConnection) Read(destination []byte) (int, error) {
+	if len(destination) == 0 {
+		return 0, nil
+	}
+	stream := connection.stream
+	stream.readMu.Lock()
+	defer stream.readMu.Unlock()
+	for len(stream.readBuffer) == 0 {
+		select {
+		case payload := <-stream.inbound:
+			stream.readBuffer = payload
+		case <-stream.done:
+			return 0, io.EOF
+		case <-stream.context.Done():
+			return 0, stream.context.Err()
+		}
+	}
+	count := copy(destination, stream.readBuffer)
+	stream.readBuffer = stream.readBuffer[count:]
+	return count, nil
+}
+
+func (connection *streamConnection) Write(data []byte) (int, error) {
+	written := 0
+	for written < len(data) {
+		end := written + wire.MaxStreamPayloadSize
+		if end > len(data) {
+			end = len(data)
+		}
+		if err := connection.stream.session.sendFrame(connection.stream.id, data[written:end]); err != nil {
+			return written, err
+		}
+		written = end
+	}
+	return written, nil
+}
+
+func (connection *streamConnection) Close() error {
+	connection.stream.finish(true)
+	return nil
+}
+
+func (connection *streamConnection) LocalAddr() net.Addr {
+	return streamAddress("ariadne-connector")
+}
+
+func (connection *streamConnection) RemoteAddr() net.Addr {
+	return streamAddress("ariadne-client")
+}
+
+func (connection *streamConnection) SetDeadline(time.Time) error      { return nil }
+func (connection *streamConnection) SetReadDeadline(time.Time) error  { return nil }
+func (connection *streamConnection) SetWriteDeadline(time.Time) error { return nil }
+
+type streamAddress string
+
+func (address streamAddress) Network() string { return "ariadne" }
+func (address streamAddress) String() string  { return string(address) }
 
 func writeAll(writer io.Writer, data []byte) error {
 	for len(data) > 0 {

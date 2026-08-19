@@ -34,14 +34,15 @@ func run() error {
 	relayURL := flags.String("relay", "http://127.0.0.1:8088", "relay base URL")
 	alias := flags.String("alias", "", "stable human-readable node alias")
 	identityPath := flags.String("identity", defaultIdentityPath, "persistent Ed25519 identity file")
-	sshAddress := flags.String("ssh-address", "127.0.0.1:8022", "local sshd TCP address")
+	sshAddress := flags.String("ssh-address", "127.0.0.1:8022", "optional local sshd TCP address used by ari proxy")
+	shell := flags.String("shell", "", "shell executable for zero-config ari shell (defaults to SHELL, then sh)")
 	token := flags.String("token", os.Getenv("ARIADNE_TOKEN"), "shared bearer token (prefer ARIADNE_TOKEN)")
 	insecureNoAuth := flags.Bool("insecure-no-auth", false, "connect without authentication")
 	allowInsecureRelay := flags.Bool("allow-insecure-relay", false, "allow plaintext relay outside loopback")
 	maxConcurrentExec := flags.Int("max-concurrent-exec", 4, "maximum concurrent exec requests")
 	maxExecTimeout := flags.Duration("max-exec-timeout", 10*time.Minute, "maximum exec duration")
 	maxOutput := flags.Int("max-output", 1<<20, "maximum captured bytes for each output stream")
-	maxStreams := flags.Int("max-streams", 64, "maximum simultaneous SSH streams")
+	maxStreams := flags.Int("max-streams", 64, "maximum simultaneous shell and SSH proxy streams")
 	verbose := flags.Bool("verbose", false, "enable debug logs")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(os.Args[1:]); err != nil {
@@ -83,6 +84,7 @@ func run() error {
 		Version:           version,
 		Identity:          nodeIdentity,
 		SSHAddress:        *sshAddress,
+		Shell:             *shell,
 		MaxConcurrentExec: *maxConcurrentExec,
 		MaxExecTimeout:    *maxExecTimeout,
 		MaxOutputBytes:    *maxOutput,

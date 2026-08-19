@@ -93,6 +93,19 @@ func (stream *relayStream) finishedError() error {
 }
 
 func (server *Server) handleStreamProxy(response http.ResponseWriter, request *http.Request, session *nodeSession, protocol string) {
+	sshClientPublicKey := ""
+	if protocol == "shell" {
+		sshClientPublicKey = request.Header.Get(wire.HeaderSSHClientKey)
+		if _, err := parseWireSSHKey(sshClientPublicKey); err != nil {
+			writeAPIError(response, http.StatusBadRequest, "invalid SSH session public key: "+err.Error())
+			return
+		}
+	} else if request.Header.Get(wire.HeaderSSHClientKey) != "" {
+		writeAPIError(response, http.StatusBadRequest, "SSH session public key is only valid for shell streams")
+		return
+	}
+	response.Header().Set(wire.HeaderNodeID, session.info.ID)
+	response.Header().Set(wire.HeaderSSHHostKey, session.info.SSHHostKey)
 	clientConnection, err := websocket.Accept(response, request, nil)
 	if err != nil {
 		server.logger.Warn("client stream WebSocket upgrade failed", "error", err)
@@ -120,8 +133,9 @@ func (server *Server) handleStreamProxy(response http.ResponseWriter, request *h
 	}()
 
 	if err := session.sendControl(wire.MessageStreamOpen, "", wire.StreamOpen{
-		StreamID: stream.id,
-		Protocol: protocol,
+		StreamID:           stream.id,
+		Protocol:           protocol,
+		SSHClientPublicKey: sshClientPublicKey,
 	}); err != nil {
 		_ = clientConnection.Close(websocket.StatusGoingAway, "node disconnected")
 		return

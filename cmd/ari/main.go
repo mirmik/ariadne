@@ -70,6 +70,12 @@ func run(arguments []string) int {
 		if err == nil {
 			return exitCode
 		}
+	case "shell":
+		var exitCode int
+		exitCode, err = runShell(runContext, apiClient, commandArguments)
+		if err == nil {
+			return exitCode
+		}
 	case "proxy":
 		err = runProxy(runContext, apiClient, commandArguments)
 	case "help":
@@ -188,6 +194,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, `Usage:
   ari [global flags] nodes
   ari [global flags] exec [--cwd DIR] [--timeout DURATION] TARGET -- COMMAND [ARG...]
+  ari [global flags] shell TARGET
   ari [global flags] proxy TARGET
 
 Global flags must appear before the command. Use "ari proxy %h" as an

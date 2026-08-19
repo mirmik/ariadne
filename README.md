@@ -1,29 +1,31 @@
 # Ariadne
 
-Ariadne даёт агенту или человеку доступ к машине за NAT по стабильному имени. Машина сама держит исходящее WebSocket-соединение с relay; входящий SSH-порт ей не нужен.
+Ariadne даёт агенту или человеку доступ к машине за NAT по стабильному имени. Машина сама держит исходящее WebSocket-соединение с relay; входящий порт, отдельный `sshd` и ручная раскладка SSH-ключей для минимального сценария не нужны.
 
 Репозиторий пока содержит экспериментальный, но уже сквозной MVP:
 
 - `ariadne-relay` — registry online-узлов и маршрутизация потоков;
-- `ariadne-connector` — исходящее соединение, постоянная Ed25519 identity, forwarding до локального `sshd` и структурированный exec;
-- `ari` — команды `nodes`, `exec` и OpenSSH `ProxyCommand`;
+- `ariadne-connector` — исходящее соединение, постоянная Ed25519 identity, встроенный SSH endpoint, PTY, опциональный forwarding до локального `sshd` и структурированный exec;
+- `ari` — команды `nodes`, `exec`, zero-config `shell` и OpenSSH-совместимый `proxy`;
 - challenge-response регистрации, bearer-аутентификация, reconnect, лимиты времени, параллелизма и вывода;
 - unit-тесты и интеграционный тест полного relay → connector пути.
 
 ## Как устроен текущий data plane
 
 ```text
-OpenSSH / ari exec
-       │ HTTPS/WSS
-       ▼
-  ariadne-relay
-       ▲
-       │ исходящее WSS
-       │
-ariadne-connector ── TCP ── localhost:sshd
+ari shell / ari exec
+        │ HTTPS/WSS
+        ▼
+   ariadne-relay
+        ▲
+        │ исходящее WSS
+        │
+ ariadne-connector ── PTY ── shell того же OS-пользователя
 ```
 
-SSH остаётся end-to-end протоколом между OpenSSH и удалённым `sshd`. Relay переносит непрозрачные SSH-байты в мультиплексированных stream-кадрах. Структурированный `exec` идёт отдельными control-сообщениями и запускает `argv` напрямую, без shell-строки.
+`ari shell` поднимает SSH непосредственно внутри одного Ariadne stream: локальный TCP listener не создаётся. CLI генерирует одноразовый Ed25519-ключ в памяти, connector принимает его только для этого потока, а CLI проверяет host key, привязанный к подписанной node identity. Relay переносит непрозрачные SSH-байты в мультиплексированных stream-кадрах. Структурированный `exec` идёт отдельными control-сообщениями и запускает `argv` напрямую, без shell-строки.
+
+`ari proxy` сохранён как совместимый низкоуровневый путь для обычного OpenSSH. Только этот режим требует локальный `sshd` и его штатные user keys/`authorized_keys`.
 
 ## Сборка
 
@@ -49,8 +51,10 @@ export ARIADNE_TOKEN="$(openssl rand -hex 32)"
 
 ```bash
 export ARIADNE_TOKEN="тот-же-токен"
-./bin/ariadne-connector --alias phone --ssh-address 127.0.0.1:8022
+./bin/ariadne-connector --alias phone
 ```
+
+`--ssh-address` влияет только на опциональный `ari proxy`; для `ari shell` этот адрес не используется, поэтому флаг можно не указывать.
 
 Проверка registry и структурированного exec:
 
@@ -58,20 +62,37 @@ export ARIADNE_TOKEN="тот-же-токен"
 ./bin/ari nodes
 ./bin/ari exec phone -- uname -a
 ./bin/ari exec --timeout 5s --cwd /tmp phone -- pwd
+./bin/ari shell phone
 ```
 
-Identity connector создаётся один раз в пользовательском config-каталоге с правами `0600`. `node_id` является хешем публичного ключа и не меняется после reconnect.
+Identity connector создаётся один раз в пользовательском config-каталоге с правами `0600`. `node_id` является хешем публичного ключа и не меняется после reconnect. Стабильный SSH host key детерминированно и с отдельным domain label выводится из этой identity, но не переиспользует сам identity key.
 
-## SSH через relay
+## Zero-config shell
 
-На Termux установите и запустите OpenSSH:
+Для интерактивного доступа достаточно:
+
+```bash
+./bin/ari shell phone
+```
+
+Если stdin является терминалом, CLI включает raw mode, запрашивает PTY и передаёт изменения размера окна. Если stdin — pipe, shell запускается без PTY, поэтому команду можно использовать и в простом скрипте:
+
+```bash
+printf 'uname -a\nexit\n' | ./bin/ari shell phone
+```
+
+Удалённый shell выбирается из `SHELL`, затем из `PATH` как `sh`; при необходимости connector принимает `--shell /absolute/path`. Дочерний процесс получает allowlist окружения без `ARIADNE_TOKEN`, но работает с правами того же OS-пользователя, что и connector.
+
+## Опциональный OpenSSH через relay
+
+Если нужна совместимость с обычным OpenSSH, на Termux можно отдельно установить и запустить сервер:
 
 ```bash
 pkg install openssh
 sshd
 ```
 
-Termux обычно слушает `127.0.0.1:8022`, поэтому это значение является default для connector. На обычном Linux передайте `--ssh-address 127.0.0.1:22`.
+Termux обычно слушает `127.0.0.1:8022`, поэтому это значение является default для connector. На обычном Linux передайте `--ssh-address 127.0.0.1:22`. Это не влияет на встроенный `ari shell`.
 
 Если статически собранный Go-бинарник в Termux не находит системные TLS roots, явно укажите пакетный CA bundle перед подключением к WSS:
 
@@ -115,10 +136,10 @@ Host phone
 - один общий bearer token вместо enrollment-токенов и action-scoped capabilities;
 - registry хранится в памяти, а offline nodes/jobs пока отсутствуют;
 - одна relay-инстанция без распределённого presence;
-- внешний `sshd` должен быть установлен и запущен отдельно;
 - нет namespace, ACL, approvals, внутренней CA и mTLS;
 - `exec` не является sandbox: команда получает права OS-пользователя connector;
-- connector и запущенная команда пока разделяют один OS UID, поэтому shared token нельзя считать изолированным от недоверенной команды;
+- connector, `exec` и встроенный shell пока разделяют один OS UID, поэтому shared token нельзя считать изолированным от недоверенной команды;
+- relay проверяет подписанную регистрацию и сообщает CLI привязанный SSH host key, но постоянный registry и отдельная enrollment-модель ещё не реализованы;
 - terminal I/O не записывается, SSH-содержимое relay не расшифровывает.
 
 Исходный архитектурный набросок находится в [docs/architecture.md](docs/architecture.md), текущий wire-протокол — в [docs/protocol.md](docs/protocol.md).

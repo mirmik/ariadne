@@ -94,3 +94,22 @@ func TestMaximumExecResultFitsControlMessage(t *testing.T) {
 		t.Fatal("binary command output changed during JSON round trip")
 	}
 }
+
+func TestRegistrationTranscriptBindsSSHHostKey(t *testing.T) {
+	hello := Hello{
+		NodeID:           "n_example",
+		Alias:            "phone",
+		PublicKey:        "identity-key",
+		SSHHostKey:       "ssh-host-key-a",
+		Platform:         "linux",
+		Architecture:     "arm64",
+		ConnectorVersion: "dev",
+	}
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	first := RegistrationTranscript(nonce, hello)
+	hello.SSHHostKey = "ssh-host-key-b"
+	second := RegistrationTranscript(nonce, hello)
+	if bytes.Equal(first, second) {
+		t.Fatal("registration transcript does not bind the embedded SSH host key")
+	}
+}

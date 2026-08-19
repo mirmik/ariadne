@@ -15,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/identity"
 	"github.com/mirmik/ariadne/internal/wire"
+	"golang.org/x/crypto/ssh"
 )
 
 type Config struct {
@@ -24,6 +25,8 @@ type Config struct {
 	Version           string
 	Identity          *identity.Identity
 	SSHAddress        string
+	Shell             string
+	ShellEnvironment  []string
 	MaxConcurrentExec int
 	MaxExecTimeout    time.Duration
 	MaxOutputBytes    int
@@ -36,8 +39,10 @@ type Config struct {
 }
 
 type Connector struct {
-	config   Config
-	executor Executor
+	config     Config
+	executor   Executor
+	sshServer  *embeddedSSHServer
+	sshHostKey string
 }
 
 func New(config Config, executor Executor) (*Connector, error) {
@@ -88,7 +93,16 @@ func New(config Config, executor Executor) (*Connector, error) {
 	if executor == nil {
 		executor = LocalExecutor{MaxOutputBytes: config.MaxOutputBytes}
 	}
-	return &Connector{config: config, executor: executor}, nil
+	hostSigner, err := ssh.NewSignerFromKey(config.Identity.SSHHostSigner())
+	if err != nil {
+		return nil, fmt.Errorf("create embedded SSH host signer: %w", err)
+	}
+	return &Connector{
+		config:     config,
+		executor:   executor,
+		sshServer:  newEmbeddedSSHServer(hostSigner, config.Shell, config.ShellEnvironment, config.Logger),
+		sshHostKey: base64.RawStdEncoding.EncodeToString(hostSigner.PublicKey().Marshal()),
+	}, nil
 }
 
 func ConnectorURL(base string) (string, error) {
@@ -165,6 +179,7 @@ func (connector *Connector) RunOnce(ctx context.Context) error {
 		NodeID:           connector.config.Identity.NodeID(),
 		Alias:            connector.config.Alias,
 		PublicKey:        connector.config.Identity.EncodedPublicKey(),
+		SSHHostKey:       connector.sshHostKey,
 		Platform:         runtime.GOOS,
 		Architecture:     runtime.GOARCH,
 		ConnectorVersion: connector.config.Version,
@@ -210,7 +225,7 @@ func (connector *Connector) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if registered.Node.ID != hello.NodeID || registered.Node.Alias != hello.Alias {
+	if registered.Node.ID != hello.NodeID || registered.Node.Alias != hello.Alias || registered.Node.SSHHostKey != hello.SSHHostKey {
 		return errors.New("relay registered a different node identity")
 	}
 	cancelHandshake()
