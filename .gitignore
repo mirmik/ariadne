@@ -1,0 +1,5 @@
+/bin/
+/dist/
+/.ariadne/
+*.test
+coverage.out
