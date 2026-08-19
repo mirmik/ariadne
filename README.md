@@ -38,6 +38,52 @@ go build -o bin/ariadne-relay ./cmd/ariadne-relay
 go build -o bin/ariadne-connector ./cmd/ariadne-connector
 ```
 
+### Через Taskfile
+
+Если установлен [Task](https://taskfile.dev/), тот же рабочий цикл короче:
+
+```bash
+cp .env.example .env.local
+# Заполните ARIADNE_TOKEN в .env.local, например результатом openssl rand -hex 32
+
+task --list
+task build
+task check
+```
+
+Для локального сквозного запуска откройте три терминала в репозитории:
+
+```bash
+# Терминал 1
+task relay
+
+# Терминал 2
+task connector
+
+# Терминал 3
+task nodes
+task shell
+task exec -- uname -a
+```
+
+Значения из `.env.local` можно переопределять для одной команды:
+
+```bash
+task connector RELAY=https://relay.example NODE_ALIAS=tablet
+task shell RELAY=https://relay.example NODE=tablet
+task exec NODE=tablet EXEC_FLAGS='--timeout 5s --cwd /tmp' -- pwd
+```
+
+Сборка connector и CLI для Termux на обычном Android/ARM64:
+
+```bash
+task build:android
+# dist/ariadne-connector-android-arm64
+# dist/ari-android-arm64
+```
+
+Для Linux/ARM64 аналогично доступен `task build:linux-arm64`. Переменные `BIN_DIR`, `DIST_DIR` и `ARCH` переопределяют каталоги локальной сборки, release-каталог и Android-архитектуру соответственно.
+
 ## Локальная проверка
 
 Создайте один и тот же случайный токен в окружении relay, connector и CLI:

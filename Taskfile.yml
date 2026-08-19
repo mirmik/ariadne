@@ -1,0 +1,113 @@
+version: '3'
+
+dotenv:
+  - .env.local
+  - .env
+
+vars:
+  BIN_DIR: bin
+  DIST_DIR: dist
+  RELAY: '{{default "http://127.0.0.1:8088" .ARIADNE_RELAY}}'
+  LISTEN: '{{default "127.0.0.1:8088" .ARIADNE_LISTEN}}'
+  NODE_ALIAS: '{{default "phone" .ARIADNE_ALIAS}}'
+  NODE: '{{default "phone" .ARIADNE_ALIAS}}'
+  ARCH: arm64
+
+tasks:
+  default:
+    desc: Show the available tasks
+    silent: true
+    cmd: task --list
+
+  fmt:
+    desc: Format Go sources
+    cmd: go fmt ./...
+
+  test:
+    desc: Run the test suite
+    cmd: go test ./...
+
+  test:race:
+    desc: Run the test suite with the race detector
+    cmd: go test -race ./...
+
+  vet:
+    desc: Run Go static analysis
+    cmd: go vet ./...
+
+  check:
+    desc: Run tests, static analysis, and a local build
+    cmds:
+      - task: test:race
+      - task: vet
+      - task: build
+
+  build:
+    desc: Build the local CLI, relay, and connector
+    cmds:
+      - mkdir -p "{{.BIN_DIR}}"
+      - go build -o "{{.BIN_DIR}}/ari" ./cmd/ari
+      - go build -o "{{.BIN_DIR}}/ariadne-relay" ./cmd/ariadne-relay
+      - go build -o "{{.BIN_DIR}}/ariadne-connector" ./cmd/ariadne-connector
+
+  build:android:
+    desc: Build the connector and CLI for Android/Termux (ARCH=arm64 by default)
+    env:
+      CGO_ENABLED: '0'
+      GOOS: android
+      GOARCH: '{{.ARCH}}'
+    cmds:
+      - mkdir -p "{{.DIST_DIR}}"
+      - go build -trimpath -o "{{.DIST_DIR}}/ariadne-connector-android-{{.ARCH}}" ./cmd/ariadne-connector
+      - go build -trimpath -o "{{.DIST_DIR}}/ari-android-{{.ARCH}}" ./cmd/ari
+
+  build:linux-arm64:
+    desc: Build static Linux/ARM64 connector and CLI binaries
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: arm64
+    cmds:
+      - mkdir -p "{{.DIST_DIR}}"
+      - go build -trimpath -o "{{.DIST_DIR}}/ariadne-connector-linux-arm64" ./cmd/ariadne-connector
+      - go build -trimpath -o "{{.DIST_DIR}}/ari-linux-arm64" ./cmd/ari
+
+  relay:
+    desc: Build and run the relay
+    deps: [build]
+    preconditions:
+      - sh: test -n "${ARIADNE_TOKEN:-}"
+        msg: Set ARIADNE_TOKEN or create .env.local from .env.example
+    cmd: '"{{.BIN_DIR}}/ariadne-relay" --listen "{{.LISTEN}}" {{.CLI_ARGS}}'
+
+  connector:
+    desc: Build and run a connector (NODE_ALIAS=phone by default)
+    deps: [build]
+    preconditions:
+      - sh: test -n "${ARIADNE_TOKEN:-}"
+        msg: Set ARIADNE_TOKEN or create .env.local from .env.example
+    cmd: '"{{.BIN_DIR}}/ariadne-connector" --relay "{{.RELAY}}" --alias "{{.NODE_ALIAS}}" {{.CLI_ARGS}}'
+
+  nodes:
+    desc: List nodes currently connected to the relay
+    deps: [build]
+    preconditions:
+      - sh: test -n "${ARIADNE_TOKEN:-}"
+        msg: Set ARIADNE_TOKEN or create .env.local from .env.example
+    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.RELAY}}" nodes'
+
+  shell:
+    desc: Open the zero-config shell on NODE=phone
+    deps: [build]
+    preconditions:
+      - sh: test -n "${ARIADNE_TOKEN:-}"
+        msg: Set ARIADNE_TOKEN or create .env.local from .env.example
+    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.RELAY}}" shell "{{.NODE}}"'
+
+  exec:
+    desc: Run a command on NODE=phone; pass it after --
+    deps: [build]
+    preconditions:
+      - sh: test -n "${ARIADNE_TOKEN:-}"
+        msg: Set ARIADNE_TOKEN or create .env.local from .env.example
+    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.RELAY}}" exec {{.EXEC_FLAGS}} "{{.NODE}}" -- {{.CLI_ARGS}}'

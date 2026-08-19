@@ -1,5 +1,7 @@
 /bin/
 /dist/
 /.ariadne/
+.env
+.env.local
 *.test
 coverage.out
