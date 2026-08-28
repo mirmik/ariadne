@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -116,23 +117,42 @@ func (buffer *cappedBuffer) Truncated() bool {
 }
 
 func safeEnvironment(environment []string) []string {
+	return safeEnvironmentForOS(environment, runtime.GOOS)
+}
+
+func safeEnvironmentForOS(environment []string, targetOS string) []string {
 	allowed := map[string]struct{}{
-		"ANDROID_DATA":     {},
-		"ANDROID_ROOT":     {},
-		"EXTERNAL_STORAGE": {},
-		"HOME":             {},
-		"LANG":             {},
-		"LC_ALL":           {},
-		"LC_CTYPE":         {},
-		"LOGNAME":          {},
-		"PATH":             {},
-		"PREFIX":           {},
-		"SHELL":            {},
-		"TERM":             {},
-		"TMP":              {},
-		"TMPDIR":           {},
-		"TEMP":             {},
-		"USER":             {},
+		"ANDROID_DATA":      {},
+		"ANDROID_ROOT":      {},
+		"APPDATA":           {},
+		"COMSPEC":           {},
+		"EXTERNAL_STORAGE":  {},
+		"HOME":              {},
+		"HOMEDRIVE":         {},
+		"HOMEPATH":          {},
+		"LANG":              {},
+		"LC_ALL":            {},
+		"LC_CTYPE":          {},
+		"LOCALAPPDATA":      {},
+		"LOGNAME":           {},
+		"PATH":              {},
+		"PATHEXT":           {},
+		"PREFIX":            {},
+		"PROGRAMDATA":       {},
+		"PROGRAMFILES":      {},
+		"PROGRAMFILES(X86)": {},
+		"PROGRAMW6432":      {},
+		"SHELL":             {},
+		"SYSTEMDRIVE":       {},
+		"SYSTEMROOT":        {},
+		"TERM":              {},
+		"TMP":               {},
+		"TMPDIR":            {},
+		"TEMP":              {},
+		"USER":              {},
+		"USERNAME":          {},
+		"USERPROFILE":       {},
+		"WINDIR":            {},
 	}
 	filtered := make([]string, 0, len(environment))
 	for _, item := range environment {
@@ -140,7 +160,11 @@ func safeEnvironment(environment []string) []string {
 		if !found {
 			continue
 		}
-		if _, ok := allowed[name]; ok || strings.HasPrefix(name, "LC_") {
+		lookupName := name
+		if targetOS == "windows" {
+			lookupName = strings.ToUpper(name)
+		}
+		if _, ok := allowed[lookupName]; ok || strings.HasPrefix(lookupName, "LC_") {
 			filtered = append(filtered, item)
 		}
 	}

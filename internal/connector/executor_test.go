@@ -65,6 +65,25 @@ func TestSafeEnvironmentDropsCredentials(t *testing.T) {
 	}
 }
 
+func TestSafeEnvironmentPreservesWindowsNamesCaseInsensitively(t *testing.T) {
+	filtered := safeEnvironmentForOS([]string{
+		"Path=C:\\Windows\\System32",
+		"SystemRoot=C:\\Windows",
+		"UserProfile=C:\\Users\\radio",
+		"ProgramFiles(x86)=C:\\Program Files (x86)",
+		"Database_Password=secret",
+	}, "windows")
+	joined := strings.Join(filtered, "\n")
+	for _, expected := range []string{"Path=", "SystemRoot=", "UserProfile=", "ProgramFiles(x86)="} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("Windows environment variable %q was removed: %v", expected, filtered)
+		}
+	}
+	if strings.Contains(joined, "secret") {
+		t.Fatalf("credential-like value leaked: %v", filtered)
+	}
+}
+
 func helperExecutor(maxOutput int) LocalExecutor {
 	environment := append([]string(nil), os.Environ()...)
 	environment = append(environment, "ARIADNE_EXECUTOR_HELPER=1")
