@@ -129,8 +129,11 @@ sudo -iu working-user
 Основной сценарий запуска connector на внешней машине:
 
 ```bash
-ariadne-connector --relay-ssh breakglass@server --alias phone
+ariadne-connector --relay-ssh breakglass@server:22061 --alias phone
 ```
+
+Суффикс `:22061` задаёт нестандартный SSH port и может быть опущен для порта
+из OpenSSH config или стандартного `22`.
 
 Ручной эквивалент node tunnel:
 

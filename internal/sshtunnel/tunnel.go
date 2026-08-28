@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,8 +33,9 @@ type Tunnel struct {
 }
 
 func Start(ctx context.Context, config Config) (*Tunnel, error) {
-	if config.Destination == "" {
-		return nil, errors.New("SSH tunnel destination is required")
+	destination, port, err := parseDestination(config.Destination)
+	if err != nil {
+		return nil, err
 	}
 	remoteHost, remotePort, err := net.SplitHostPort(config.RemoteAddress)
 	if err != nil || remotePort == "" || !transport.IsLoopbackHost(remoteHost) {
@@ -50,12 +52,8 @@ func Start(ctx context.Context, config Config) (*Tunnel, error) {
 		return nil, err
 	}
 	forward := localAddress + ":" + config.RemoteAddress
-	command := exec.CommandContext(ctx, "ssh",
-		"-N", "-T", "-n",
-		"-o", "ExitOnForwardFailure=yes",
-		"-L", forward,
-		config.Destination,
-	)
+	arguments := sshArguments(destination, port, forward)
+	command := exec.CommandContext(ctx, "ssh", arguments...)
 	command.Stdout = os.Stderr
 	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {
@@ -100,6 +98,75 @@ func Start(ctx context.Context, config Config) (*Tunnel, error) {
 			return nil, ctx.Err()
 		}
 	}
+}
+
+func sshArguments(destination, port, forward string) []string {
+	arguments := []string{
+		"-N", "-T", "-n",
+		"-o", "ExitOnForwardFailure=yes",
+	}
+	if port != "" {
+		arguments = append(arguments, "-p", port)
+	}
+	arguments = append(arguments, "-L", forward, destination)
+	return arguments
+}
+
+func parseDestination(raw string) (destination, port string, err error) {
+	if raw == "" {
+		return "", "", errors.New("SSH tunnel destination is required")
+	}
+	if strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "\t\r\n\x00") {
+		return "", "", errors.New("SSH tunnel destination must not contain whitespace or control characters")
+	}
+	if strings.HasPrefix(raw, "-") {
+		return "", "", errors.New("SSH tunnel destination must not start with an option prefix")
+	}
+
+	userPrefix := ""
+	hostPort := raw
+	if at := strings.LastIndexByte(raw, '@'); at >= 0 {
+		if at == 0 || at == len(raw)-1 {
+			return "", "", errors.New("SSH tunnel destination must contain a non-empty user and host")
+		}
+		userPrefix = raw[:at+1]
+		hostPort = raw[at+1:]
+	}
+
+	host := hostPort
+	portText := ""
+	if strings.HasPrefix(hostPort, "[") {
+		closing := strings.IndexByte(hostPort, ']')
+		if closing < 0 {
+			return "", "", errors.New("SSH tunnel destination has an unterminated IPv6 address")
+		}
+		host = hostPort[1:closing]
+		remainder := hostPort[closing+1:]
+		switch {
+		case remainder == "":
+		case strings.HasPrefix(remainder, ":"):
+			portText = remainder[1:]
+		default:
+			return "", "", errors.New("SSH tunnel destination has invalid text after the bracketed host")
+		}
+	} else if strings.Count(hostPort, ":") == 1 {
+		host, portText, _ = strings.Cut(hostPort, ":")
+	}
+
+	if host == "" || strings.HasPrefix(host, "-") {
+		return "", "", errors.New("SSH tunnel destination must contain a valid host")
+	}
+	if portText != "" {
+		parsedPort, parseErr := strconv.ParseUint(portText, 10, 16)
+		if parseErr != nil || parsedPort == 0 {
+			return "", "", errors.New("SSH tunnel port must be an integer between 1 and 65535")
+		}
+		port = strconv.FormatUint(parsedPort, 10)
+	} else if strings.HasSuffix(hostPort, ":") {
+		return "", "", errors.New("SSH tunnel destination has an empty port")
+	}
+
+	return userPrefix + host, port, nil
 }
 
 func (tunnel *Tunnel) Done() <-chan struct{} {

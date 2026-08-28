@@ -33,7 +33,7 @@ func run() error {
 	}
 	flags := flag.NewFlagSet("ariadne-connector", flag.ContinueOnError)
 	relayURL := flags.String("relay", "http://127.0.0.1:47471", "node-plane relay base URL")
-	relaySSH := flags.String("relay-ssh", "", "reach node plane through an OpenSSH local tunnel")
+	relaySSH := flags.String("relay-ssh", "", "reach node plane through OpenSSH (user@host or user@host:port)")
 	alias := flags.String("alias", "", "reported human-readable label (claimed on the management plane)")
 	identityPath := flags.String("identity", defaultIdentityPath, "persistent Ed25519 identity file")
 	sshAddress := flags.String("ssh-address", "127.0.0.1:8022", "optional local sshd TCP address used by ari proxy")

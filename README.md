@@ -188,11 +188,11 @@ Relay запускает два независимых HTTP server. Management p
 
 ```bash
 ariadne-connector \
-  --relay-ssh breakglass@relay-host \
+  --relay-ssh breakglass@relay-host:22061 \
   --alias phone
 ```
 
-OpenSSH запрашивает временный break-glass пароль, создаёт local forward до `127.0.0.1:47471` на relay и остаётся дочерним процессом connector. После истечения password TTL установленный tunnel продолжает работать. Если SSH-соединение оборвётся, connector завершится: для нового входа нужно снова открыть break-glass окно и перезапустить connector.
+SSH port после двоеточия необязателен; без него OpenSSH использует config или порт `22`. OpenSSH запрашивает временный break-glass пароль, создаёт local forward до `127.0.0.1:47471` на relay и остаётся дочерним процессом connector. После истечения password TTL установленный tunnel продолжает работать. Если SSH-соединение оборвётся, connector завершится: для нового входа нужно снова открыть break-glass окно и перезапустить connector.
 
 `ari` в основном сценарии работает рядом с relay и обращается к `http://127.0.0.1:8088`, используя локальный management token. Для другой доверенной management-машины token-файл нужно безопасно доставить отдельно, а соединение провести через SSH tunnel или TLS reverse proxy. Явный `--allow-insecure-management-listen` разрешает plaintext bearer token на non-loopback адресе и предназначен только для изолированной доверенной сети. Режим `ari --relay-ssh` сохранён как вспомогательный вариант; на машине с `ari` всё равно должен быть management token-файл.
 

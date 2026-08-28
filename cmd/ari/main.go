@@ -34,7 +34,7 @@ func run(arguments []string) int {
 	flags := flag.NewFlagSet("ari", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	relayURL := flags.String("relay", "http://127.0.0.1:8088", "management-plane relay base URL")
-	relaySSH := flags.String("relay-ssh", "", "reach management plane through an OpenSSH local tunnel")
+	relaySSH := flags.String("relay-ssh", "", "reach management plane through OpenSSH (user@host or user@host:port)")
 	managementTokenPath := flags.String("management-token-file", defaultManagementTokenPath, "management bearer token file")
 	allowInsecureRelay := flags.Bool("allow-insecure-relay", false, "allow plaintext relay outside loopback")
 	showVersion := flags.Bool("version", false, "print version and exit")
