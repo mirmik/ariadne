@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -29,29 +30,15 @@ import (
 func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	relayConfig := relay.DefaultConfig()
-	relayConfig.Token = "test-token"
 	relayConfig.PingInterval = 20 * time.Millisecond
 	relayConfig.PingTimeout = time.Second
 	relayServer := relay.New(relayConfig, logger)
 	defer relayServer.Close()
-	httpListener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpServer := httptest.NewUnstartedServer(relayServer.Handler())
-	httpServer.Listener = httpListener
-	httpServer.Start()
-	defer httpServer.Close()
-	unauthorizedClient, err := client.New(client.Config{RelayURL: httpServer.URL, Token: "wrong-token", HTTPClient: httpServer.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unauthorizedContext, cancelUnauthorized := context.WithTimeout(context.Background(), time.Second)
-	_, unauthorizedErr := unauthorizedClient.Nodes(unauthorizedContext)
-	cancelUnauthorized()
-	if unauthorizedErr == nil {
-		t.Fatal("relay accepted an invalid bearer token")
-	}
+	nodeServer := startHTTPTestServer(t, relayServer.NodeHandler())
+	defer nodeServer.Close()
+	managementServer := startHTTPTestServer(t, relayServer.ManagementHandler())
+	defer managementServer.Close()
+	assertPlaneIsolation(t, nodeServer, managementServer)
 
 	echoAddress, closeEcho := startEchoServer(t)
 	defer closeEcho()
@@ -60,8 +47,7 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodeConnector, err := connector.New(connector.Config{
-		RelayURL:   httpServer.URL,
-		Token:      "test-token",
+		RelayURL:   nodeServer.URL,
 		Alias:      "phone",
 		Identity:   nodeIdentity,
 		SSHAddress: echoAddress,
@@ -70,9 +56,9 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 			"HOME=" + t.TempDir(),
 			"PATH=/usr/bin:/bin",
 			"SHELL=/bin/sh",
-			"ARIADNE_TOKEN=must-not-leak",
+			"ARIADNE_PRIVATE=must-not-leak",
 		},
-		HTTPClient: httpServer.Client(),
+		HTTPClient: nodeServer.Client(),
 		Logger:     logger,
 	}, echoExecutor{})
 	if err != nil {
@@ -93,14 +79,20 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	}()
 
 	apiClient, err := client.New(client.Config{
-		RelayURL:   httpServer.URL,
-		Token:      "test-token",
-		HTTPClient: httpServer.Client(),
+		RelayURL:   managementServer.URL,
+		HTTPClient: managementServer.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForNode(t, apiClient, "phone")
+	node := waitForNode(t, apiClient, "phone")
+	claimed, err := apiClient.Claim(context.Background(), node.ID, "phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed.AliasClaimed || claimed.Alias != "phone" {
+		t.Fatalf("unexpected claim result: %#v", claimed)
+	}
 
 	execContext, cancelExec := context.WithTimeout(context.Background(), 2*time.Second)
 	result, err := apiClient.Exec(execContext, "phone", wire.ExecRequest{
@@ -178,7 +170,7 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	if err := shellSession.Shell(); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(stdinWriter, "stty size\nprintf 'TOKEN=<%s>\\n' \"$ARIADNE_TOKEN\"\n")
+	_, _ = io.WriteString(stdinWriter, "stty size\nprintf 'PRIVATE=<%s>\\n' \"$ARIADNE_PRIVATE\"\n")
 	waitForOutput(t, output, "24 80")
 	if err := shellSession.WindowChange(40, 100); err != nil {
 		t.Fatal(err)
@@ -192,8 +184,8 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	if !strings.Contains(output.String(), "40 100") {
 		t.Fatalf("PTY resize was not observed; output=%q", output.String())
 	}
-	if strings.Contains(output.String(), "must-not-leak") || !strings.Contains(output.String(), "TOKEN=<>") {
-		t.Fatalf("connector credentials leaked into shell environment; output=%q", output.String())
+	if strings.Contains(output.String(), "must-not-leak") || !strings.Contains(output.String(), "PRIVATE=<>") {
+		t.Fatalf("connector private environment leaked into shell; output=%q", output.String())
 	}
 
 	nonPTYSigner := newSSHSigner(t)
@@ -224,13 +216,45 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	}
 }
 
+func startHTTPTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	return server
+}
+
+func assertPlaneIsolation(t *testing.T, nodeServer, managementServer *httptest.Server) {
+	t.Helper()
+	response, err := nodeServer.Client().Get(nodeServer.URL + "/v1/nodes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("node plane exposed management API: status=%d", response.StatusCode)
+	}
+	response, err = managementServer.Client().Get(managementServer.URL + "/v1/connect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("management plane exposed connector endpoint: status=%d", response.StatusCode)
+	}
+}
+
 type echoExecutor struct{}
 
 func (echoExecutor) Execute(_ context.Context, request wire.ExecRequest) wire.ExecResult {
 	return wire.ExecResult{ExitCode: 0, Stdout: []byte(strings.Join(request.Argv, "\x00"))}
 }
 
-func waitForNode(t *testing.T, apiClient *client.Client, alias string) {
+func waitForNode(t *testing.T, apiClient *client.Client, alias string) wire.NodeInfo {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -240,13 +264,14 @@ func waitForNode(t *testing.T, apiClient *client.Client, alias string) {
 		if err == nil {
 			for _, node := range nodes {
 				if node.Alias == alias && node.Online {
-					return
+					return node
 				}
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("node %q did not come online", alias)
+	return wire.NodeInfo{}
 }
 
 func startEchoServer(t *testing.T) (string, func()) {

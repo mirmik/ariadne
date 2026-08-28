@@ -36,7 +36,7 @@ func ValidateListenAddress(address string, tlsEnabled, allowPlaintext bool) erro
 	if IsLoopbackHost(host) {
 		return nil
 	}
-	return errors.New("plaintext relay may listen only on loopback; configure TLS or --allow-insecure-listen")
+	return errors.New("plaintext listener may bind only to loopback; configure TLS or an explicit insecure override")
 }
 
 func IsLoopbackHost(host string) bool {

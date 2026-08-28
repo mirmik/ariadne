@@ -104,8 +104,9 @@ func (server *Server) handleStreamProxy(response http.ResponseWriter, request *h
 		writeAPIError(response, http.StatusBadRequest, "SSH session public key is only valid for shell streams")
 		return
 	}
-	response.Header().Set(wire.HeaderNodeID, session.info.ID)
-	response.Header().Set(wire.HeaderSSHHostKey, session.info.SSHHostKey)
+	sessionInfo := session.nodeInfo()
+	response.Header().Set(wire.HeaderNodeID, sessionInfo.ID)
+	response.Header().Set(wire.HeaderSSHHostKey, sessionInfo.SSHHostKey)
 	clientConnection, err := websocket.Accept(response, request, nil)
 	if err != nil {
 		server.logger.Warn("client stream WebSocket upgrade failed", "error", err)
@@ -148,7 +149,7 @@ func (server *Server) handleStreamProxy(response http.ResponseWriter, request *h
 		return
 	}
 
-	server.logger.Debug("stream opened", "node_id", session.info.ID, "stream_id", stream.id, "protocol", protocol)
+	server.logger.Debug("stream opened", "node_id", sessionInfo.ID, "stream_id", stream.id, "protocol", protocol)
 	proxyContext, cancelProxy := context.WithCancel(server.context)
 	defer cancelProxy()
 	errorChannel := make(chan error, 3)
@@ -168,7 +169,7 @@ func (server *Server) handleStreamProxy(response http.ResponseWriter, request *h
 	stream.finish(err)
 	cancelProxy()
 	if err != nil && !isNormalStreamEnd(err) {
-		server.logger.Debug("stream closed with error", "node_id", session.info.ID, "stream_id", stream.id, "error", err)
+		server.logger.Debug("stream closed with error", "node_id", sessionInfo.ID, "stream_id", stream.id, "error", err)
 	}
 }
 

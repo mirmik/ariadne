@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -25,26 +24,29 @@ import (
 )
 
 type Config struct {
-	Version             string
-	Token               string
-	RegistrationTimeout time.Duration
-	StreamOpenTimeout   time.Duration
-	DefaultExecTimeout  time.Duration
-	MaxExecTimeout      time.Duration
-	ExecResultGrace     time.Duration
-	PingInterval        time.Duration
-	PingTimeout         time.Duration
+	Version              string
+	RegistrationTimeout  time.Duration
+	StreamOpenTimeout    time.Duration
+	DefaultExecTimeout   time.Duration
+	MaxExecTimeout       time.Duration
+	ExecResultGrace      time.Duration
+	PingInterval         time.Duration
+	PingTimeout          time.Duration
+	MaxPendingHandshakes int
+	MaxOnlineNodes       int
 }
 
 func DefaultConfig() Config {
 	return Config{
-		RegistrationTimeout: 10 * time.Second,
-		StreamOpenTimeout:   10 * time.Second,
-		DefaultExecTimeout:  30 * time.Second,
-		MaxExecTimeout:      10 * time.Minute,
-		ExecResultGrace:     5 * time.Second,
-		PingInterval:        30 * time.Second,
-		PingTimeout:         10 * time.Second,
+		RegistrationTimeout:  10 * time.Second,
+		StreamOpenTimeout:    10 * time.Second,
+		DefaultExecTimeout:   30 * time.Second,
+		MaxExecTimeout:       10 * time.Minute,
+		ExecResultGrace:      5 * time.Second,
+		PingInterval:         30 * time.Second,
+		PingTimeout:          10 * time.Second,
+		MaxPendingHandshakes: 64,
+		MaxOnlineNodes:       1024,
 	}
 }
 
@@ -52,12 +54,14 @@ type Server struct {
 	config Config
 	logger *slog.Logger
 
-	context context.Context
-	cancel  context.CancelFunc
+	context    context.Context
+	cancel     context.CancelFunc
+	handshakes chan struct{}
 
-	mu      sync.RWMutex
-	byID    map[string]*nodeSession
-	byAlias map[string]*nodeSession
+	mu             sync.RWMutex
+	byID           map[string]*nodeSession
+	claimsByID     map[string]string
+	claimedByAlias map[string]string
 }
 
 func New(config Config, logger *slog.Logger) *Server {
@@ -91,27 +95,44 @@ func New(config Config, logger *slog.Logger) *Server {
 	if config.PingTimeout <= 0 {
 		config.PingTimeout = defaults.PingTimeout
 	}
+	if config.MaxPendingHandshakes <= 0 {
+		config.MaxPendingHandshakes = defaults.MaxPendingHandshakes
+	}
+	if config.MaxOnlineNodes <= 0 {
+		config.MaxOnlineNodes = defaults.MaxOnlineNodes
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	serverContext, cancel := context.WithCancel(context.Background())
 	return &Server{
-		config:  config,
-		logger:  logger,
-		context: serverContext,
-		cancel:  cancel,
-		byID:    make(map[string]*nodeSession),
-		byAlias: make(map[string]*nodeSession),
+		config:         config,
+		logger:         logger,
+		context:        serverContext,
+		cancel:         cancel,
+		handshakes:     make(chan struct{}, config.MaxPendingHandshakes),
+		byID:           make(map[string]*nodeSession),
+		claimsByID:     make(map[string]string),
+		claimedByAlias: make(map[string]string),
 	}
 }
 
-func (server *Server) Handler() http.Handler {
+// NodeHandler exposes only the connector-facing, reactive node plane.
+func (server *Server) NodeHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.handleHealth)
-	mux.Handle("GET /v1/nodes", server.authorize(http.HandlerFunc(server.handleNodes)))
-	mux.Handle("POST /v1/nodes/", server.authorize(http.HandlerFunc(server.handleNodeAction)))
-	mux.Handle("GET /v1/nodes/", server.authorize(http.HandlerFunc(server.handleNodeAction)))
-	mux.Handle("GET /v1/connect", server.authorize(http.HandlerFunc(server.handleConnector)))
+	mux.HandleFunc("GET /v1/connect", server.handleConnector)
+	return securityHeaders(mux)
+}
+
+// ManagementHandler exposes operations which may cause actions on nodes. It
+// must be bound to loopback or another independently authenticated transport.
+func (server *Server) ManagementHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", server.handleHealth)
+	mux.HandleFunc("GET /v1/nodes", server.handleNodes)
+	mux.HandleFunc("POST /v1/nodes/", server.handleNodeAction)
+	mux.HandleFunc("GET /v1/nodes/", server.handleNodeAction)
 	return securityHeaders(mux)
 }
 
@@ -136,7 +157,7 @@ func (server *Server) handleNodes(response http.ResponseWriter, request *http.Re
 	server.mu.RLock()
 	nodes := make([]wire.NodeInfo, 0, len(server.byID))
 	for _, session := range server.byID {
-		nodes = append(nodes, session.info)
+		nodes = append(nodes, session.nodeInfo())
 	}
 	server.mu.RUnlock()
 	sort.Slice(nodes, func(left, right int) bool {
@@ -149,6 +170,10 @@ func (server *Server) handleNodeAction(response http.ResponseWriter, request *ht
 	target, action, ok := parseNodeAction(request.URL.Path)
 	if !ok {
 		writeAPIError(response, http.StatusNotFound, "unknown node endpoint")
+		return
+	}
+	if request.Method == http.MethodPost && action == "claim" {
+		server.handleClaim(response, request, target)
 		return
 	}
 	session := server.lookup(target)
@@ -167,6 +192,36 @@ func (server *Server) handleNodeAction(response http.ResponseWriter, request *ht
 	default:
 		writeAPIError(response, http.StatusNotFound, "unknown node endpoint")
 	}
+}
+
+func (server *Server) handleClaim(response http.ResponseWriter, request *http.Request, nodeID string) {
+	request.Body = http.MaxBytesReader(response, request.Body, 16<<10)
+	var claimRequest wire.ClaimRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&claimRequest); err != nil {
+		writeAPIError(response, http.StatusBadRequest, "invalid claim request: "+err.Error())
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeAPIError(response, http.StatusBadRequest, "invalid claim request: unexpected data after JSON value")
+		return
+	}
+	if !wire.ValidAlias(claimRequest.Alias) {
+		writeAPIError(response, http.StatusBadRequest, "alias must match [A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+		return
+	}
+	node, err := server.claim(nodeID, claimRequest.Alias)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, errNodeNotOnline) {
+			status = http.StatusNotFound
+		}
+		writeAPIError(response, status, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, node)
 }
 
 func (server *Server) handleExec(response http.ResponseWriter, request *http.Request, session *nodeSession) {
@@ -212,6 +267,19 @@ func (server *Server) handleExec(response http.ResponseWriter, request *http.Req
 }
 
 func (server *Server) handleConnector(response http.ResponseWriter, request *http.Request) {
+	handshakeSlotHeld := false
+	select {
+	case server.handshakes <- struct{}{}:
+		handshakeSlotHeld = true
+		defer func() {
+			if handshakeSlotHeld {
+				<-server.handshakes
+			}
+		}()
+	default:
+		writeAPIError(response, http.StatusServiceUnavailable, "too many connector handshakes")
+		return
+	}
 	connection, err := websocket.Accept(response, request, nil)
 	if err != nil {
 		server.logger.Warn("connector WebSocket upgrade failed", "error", err)
@@ -241,6 +309,8 @@ func (server *Server) handleConnector(response http.ResponseWriter, request *htt
 		server.writeProtocolError(connection, "invalid_signature", err.Error())
 		return
 	}
+	<-server.handshakes
+	handshakeSlotHeld = false
 
 	session := newNodeSession(server, connection, wire.NodeInfo{
 		ID:               hello.NodeID,
@@ -254,7 +324,7 @@ func (server *Server) handleConnector(response http.ResponseWriter, request *htt
 	})
 	replaced, err := server.register(session)
 	if err != nil {
-		server.writeProtocolError(connection, "alias_conflict", err.Error())
+		server.writeProtocolError(connection, "capacity", err.Error())
 		return
 	}
 	if replaced != nil {
@@ -262,31 +332,18 @@ func (server *Server) handleConnector(response http.ResponseWriter, request *htt
 	}
 	defer server.unregister(session)
 
-	if err := writeControl(server.context, connection, wire.MessageRegistered, "", wire.Registered{Node: session.info}); err != nil {
+	sessionInfo := session.nodeInfo()
+	if err := writeControl(server.context, connection, wire.MessageRegistered, "", wire.Registered{Node: sessionInfo}); err != nil {
 		return
 	}
-	server.logger.Info("node connected", "node_id", session.info.ID, "alias", session.info.Alias, "platform", session.info.Platform)
+	server.logger.Info("node connected", "node_id", sessionInfo.ID, "alias", sessionInfo.Alias, "platform", sessionInfo.Platform)
 	if err := session.run(); err != nil && !errors.Is(err, context.Canceled) {
-		server.logger.Info("node disconnected", "node_id", session.info.ID, "alias", session.info.Alias, "error", err)
+		sessionInfo = session.nodeInfo()
+		server.logger.Info("node disconnected", "node_id", sessionInfo.ID, "alias", sessionInfo.Alias, "error", err)
 	}
 }
 
-func (server *Server) authorize(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if server.config.Token == "" {
-			next.ServeHTTP(response, request)
-			return
-		}
-		expected := "Bearer " + server.config.Token
-		provided := request.Header.Get("Authorization")
-		if subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) != 1 {
-			response.Header().Set("WWW-Authenticate", "Bearer")
-			writeAPIError(response, http.StatusUnauthorized, "authentication required")
-			return
-		}
-		next.ServeHTTP(response, request)
-	})
-}
+var errNodeNotOnline = errors.New("node is not online")
 
 func (server *Server) lookup(target string) *nodeSession {
 	server.mu.RLock()
@@ -294,33 +351,55 @@ func (server *Server) lookup(target string) *nodeSession {
 	if session := server.byID[target]; session != nil {
 		return session
 	}
-	return server.byAlias[strings.ToLower(target)]
+	if nodeID := server.claimedByAlias[strings.ToLower(target)]; nodeID != "" {
+		return server.byID[nodeID]
+	}
+	return nil
 }
 
 func (server *Server) register(session *nodeSession) (*nodeSession, error) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	aliasKey := strings.ToLower(session.info.Alias)
-	if owner := server.byAlias[aliasKey]; owner != nil && owner.info.ID != session.info.ID {
-		return nil, fmt.Errorf("alias %q is already used by another node", session.info.Alias)
+	info := session.nodeInfo()
+	replaced := server.byID[info.ID]
+	if replaced == nil && len(server.byID) >= server.config.MaxOnlineNodes {
+		return nil, errors.New("relay is at online node capacity")
 	}
-	replaced := server.byID[session.info.ID]
-	if replaced != nil {
-		delete(server.byAlias, strings.ToLower(replaced.info.Alias))
+	if alias := server.claimsByID[info.ID]; alias != "" {
+		session.setClaimedAlias(alias)
 	}
-	server.byID[session.info.ID] = session
-	server.byAlias[aliasKey] = session
+	server.byID[info.ID] = session
 	return replaced, nil
 }
 
 func (server *Server) unregister(session *nodeSession) {
 	server.mu.Lock()
-	if server.byID[session.info.ID] == session {
-		delete(server.byID, session.info.ID)
-		delete(server.byAlias, strings.ToLower(session.info.Alias))
+	info := session.nodeInfo()
+	if server.byID[info.ID] == session {
+		delete(server.byID, info.ID)
 	}
 	server.mu.Unlock()
 	session.close(errors.New("connector disconnected"))
+}
+
+func (server *Server) claim(nodeID, alias string) (wire.NodeInfo, error) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	session := server.byID[nodeID]
+	if session == nil {
+		return wire.NodeInfo{}, errNodeNotOnline
+	}
+	aliasKey := strings.ToLower(alias)
+	if owner := server.claimedByAlias[aliasKey]; owner != "" && owner != nodeID {
+		return wire.NodeInfo{}, fmt.Errorf("alias %q is already claimed by another node", alias)
+	}
+	if previous := server.claimsByID[nodeID]; previous != "" {
+		delete(server.claimedByAlias, strings.ToLower(previous))
+	}
+	server.claimsByID[nodeID] = alias
+	server.claimedByAlias[aliasKey] = nodeID
+	session.setClaimedAlias(alias)
+	return session.nodeInfo(), nil
 }
 
 func readAndValidateHello(ctx context.Context, connection *websocket.Conn) (wire.Hello, ed25519.PublicKey, error) {

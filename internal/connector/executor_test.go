@@ -53,7 +53,7 @@ func TestSafeEnvironmentDropsCredentials(t *testing.T) {
 	filtered := safeEnvironment([]string{
 		"PATH=/bin",
 		"LC_TEST=value",
-		"ARIADNE_TOKEN=secret",
+		"ARIADNE_PRIVATE=secret",
 		"DATABASE_PASSWORD=secret",
 	})
 	joined := strings.Join(filtered, "\n")

@@ -20,7 +20,6 @@ import (
 
 type Config struct {
 	RelayURL          string
-	Token             string
 	Alias             string
 	Version           string
 	Identity          *identity.Identity
@@ -156,14 +155,9 @@ func (connector *Connector) Run(ctx context.Context) error {
 }
 
 func (connector *Connector) RunOnce(ctx context.Context) error {
-	headers := make(http.Header)
-	if connector.config.Token != "" {
-		headers.Set("Authorization", "Bearer "+connector.config.Token)
-	}
 	dialContext, cancelDial := context.WithTimeout(ctx, connector.config.DialTimeout)
 	connection, _, err := websocket.Dial(dialContext, connector.config.RelayURL, &websocket.DialOptions{
 		HTTPClient:      connector.config.HTTPClient,
-		HTTPHeader:      headers,
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	cancelDial()

@@ -3,16 +3,20 @@ set -euo pipefail
 
 breakglass_user="breakglass"
 admin_user=""
+login_as_user=""
 binary_path=""
 
 usage() {
     cat <<'EOF'
 Usage:
-  sudo ./scripts/install-ssh-breakglass [--admin-user USER] [--binary PATH]
+  sudo ./scripts/install-ssh-breakglass [--admin-user USER] [--login-as USER]
+      [--binary PATH]
 
 Options:
   --admin-user USER  Allow this existing user to run ssh-breakglass via sudo
                       without a password (normally the account used by phone).
+  --login-as USER     Allow breakglass sessions to become this user with
+                      "sudo -iu USER". Defaults to --admin-user when set.
   --binary PATH      Install this prebuilt binary instead of bin/ssh-breakglass.
 EOF
 }
@@ -29,6 +33,11 @@ while (($# > 0)); do
             binary_path="$2"
             shift 2
             ;;
+        --login-as)
+            (($# >= 2)) || { echo "missing value for --login-as" >&2; exit 2; }
+            login_as_user="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -40,6 +49,10 @@ while (($# > 0)); do
             ;;
     esac
 done
+
+if [[ -z ${login_as_user} && -n ${admin_user} ]]; then
+    login_as_user="${admin_user}"
+fi
 
 if [[ ${EUID} -ne 0 ]]; then
     echo "install-ssh-breakglass must run as root (use sudo)" >&2
@@ -75,15 +88,27 @@ for command_name in useradd passwd sshd systemctl install getent mktemp grep; do
     }
 done
 
-if [[ -n ${admin_user} ]]; then
-    if [[ ${admin_user} == root ]] || ! getent passwd "${admin_user}" >/dev/null; then
-        echo "--admin-user must name an existing non-root user" >&2
-        exit 1
-    fi
+valid_local_user() {
+    [[ $1 =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && [[ $1 != root ]] && getent passwd "$1" >/dev/null
+}
+
+if [[ -n ${admin_user} || -n ${login_as_user} ]]; then
     command -v visudo >/dev/null || {
-        echo "visudo is required to install the sudoers rule" >&2
+        echo "visudo is required to install sudoers rules" >&2
         exit 1
     }
+fi
+if [[ -n ${admin_user} ]]; then
+    if ! valid_local_user "${admin_user}"; then
+        echo "--admin-user must name an existing non-root local user" >&2
+        exit 1
+    fi
+fi
+if [[ -n ${login_as_user} ]]; then
+    if ! valid_local_user "${login_as_user}"; then
+        echo "--login-as must name an existing non-root local user" >&2
+        exit 1
+    fi
 fi
 
 if ! getent passwd "${breakglass_user}" >/dev/null; then
@@ -135,7 +160,9 @@ for expected_setting in \
     "authenticationmethods password" \
     "passwordauthentication yes" \
     "kbdinteractiveauthentication no" \
-    "pubkeyauthentication no"; do
+    "pubkeyauthentication no" \
+    "allowtcpforwarding local" \
+    "permitopen 127.0.0.1:47471 127.0.0.1:8088"; do
     if ! grep -qx -- "${expected_setting}" <<<"${effective_config}"; then
         echo "effective SSH configuration is missing: ${expected_setting}" >&2
         echo "restoring the previous drop-in" >&2
@@ -160,13 +187,23 @@ else
 fi
 
 if [[ -n ${admin_user} ]]; then
-    sudoers_target="/etc/sudoers.d/ssh-breakglass-${admin_user}"
-    sudoers_temporary="${backup_dir}/sudoers"
+    sudoers_target="/etc/sudoers.d/ssh-breakglass-controller"
+    sudoers_temporary="${backup_dir}/sudoers-controller"
     printf '%s ALL=(root) NOPASSWD: %s\n' "${admin_user}" "${installed_binary}" >"${sudoers_temporary}"
     chmod 0440 "${sudoers_temporary}"
     visudo -cf "${sudoers_temporary}" >/dev/null
     install -o root -g root -m 0440 "${sudoers_temporary}" "${sudoers_target}"
     echo "installed sudoers rule for ${admin_user}"
+fi
+
+if [[ -n ${login_as_user} ]]; then
+    sudoers_target="/etc/sudoers.d/ssh-breakglass-session"
+    sudoers_temporary="${backup_dir}/sudoers-session"
+    printf '%s ALL=(%s) NOPASSWD: ALL\n' "${breakglass_user}" "${login_as_user}" >"${sudoers_temporary}"
+    chmod 0440 "${sudoers_temporary}"
+    visudo -cf "${sudoers_temporary}" >/dev/null
+    install -o root -g root -m 0440 "${sudoers_temporary}" "${sudoers_target}"
+    echo "breakglass sessions may become ${login_as_user} (without root privileges)"
 fi
 
 echo
@@ -175,3 +212,7 @@ echo "Keep this session open and enable a test window with:"
 echo "  sudo ${installed_binary} enable --ttl 15m"
 echo "Then test from a second terminal with:"
 echo "  ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password ${breakglass_user}@SERVER"
+if [[ -n ${login_as_user} ]]; then
+    echo "After login, enter the working account with:"
+    echo "  sudo -iu ${login_as_user}"
+fi

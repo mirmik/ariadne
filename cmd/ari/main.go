@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/client"
+	"github.com/mirmik/ariadne/internal/sshtunnel"
 	"github.com/mirmik/ariadne/internal/transport"
 	"github.com/mirmik/ariadne/internal/wire"
 )
@@ -26,9 +27,8 @@ func main() {
 func run(arguments []string) int {
 	flags := flag.NewFlagSet("ari", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	relayURL := flags.String("relay", "http://127.0.0.1:8088", "relay base URL")
-	token := flags.String("token", os.Getenv("ARIADNE_TOKEN"), "bearer token (prefer ARIADNE_TOKEN)")
-	insecureNoAuth := flags.Bool("insecure-no-auth", false, "connect without authentication")
+	relayURL := flags.String("relay", "http://127.0.0.1:8088", "management-plane relay base URL")
+	relaySSH := flags.String("relay-ssh", "", "reach management plane through an OpenSSH local tunnel")
 	allowInsecureRelay := flags.Bool("allow-insecure-relay", false, "allow plaintext relay outside loopback")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	flags.Usage = usage
@@ -43,27 +43,38 @@ func run(arguments []string) int {
 		usage()
 		return 2
 	}
-	if *token == "" && !*insecureNoAuth {
-		fmt.Fprintln(os.Stderr, "ari: ARIADNE_TOKEN is required unless --insecure-no-auth is explicitly set")
-		return 2
+	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	var err error
+	if *relaySSH != "" {
+		tunnel, tunnelErr := sshtunnel.Start(runContext, sshtunnel.Config{
+			Destination:   *relaySSH,
+			RemoteAddress: "127.0.0.1:8088",
+		})
+		if tunnelErr != nil {
+			fmt.Fprintln(os.Stderr, "ari:", tunnelErr)
+			return 1
+		}
+		defer tunnel.Close()
+		*relayURL = tunnel.URL
 	}
 	if err := transport.ValidateRelayURL(*relayURL, *allowInsecureRelay); err != nil {
 		fmt.Fprintln(os.Stderr, "ari:", err)
 		return 2
 	}
-	apiClient, err := client.New(client.Config{RelayURL: *relayURL, Token: *token})
+	apiClient, err := client.New(client.Config{RelayURL: *relayURL})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ari:", err)
 		return 2
 	}
 
-	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 	command := flags.Arg(0)
 	commandArguments := flags.Args()[1:]
 	switch command {
 	case "nodes":
 		err = runNodes(runContext, apiClient, commandArguments)
+	case "claim":
+		err = runClaim(runContext, apiClient, commandArguments)
 	case "exec":
 		var exitCode int
 		exitCode, err = runExec(runContext, apiClient, commandArguments)
@@ -105,9 +116,25 @@ func runNodes(ctx context.Context, apiClient *client.Client, arguments []string)
 	_, _ = fmt.Fprintln(writer, "ALIAS\tNODE ID\tPLATFORM\tCONNECTED")
 	for _, node := range nodes {
 		platform := node.Platform + "/" + node.Architecture
-		_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", node.Alias, node.ID, platform, node.ConnectedAt.Local().Format(time.RFC3339))
+		alias := node.Alias
+		if !node.AliasClaimed {
+			alias += "?"
+		}
+		_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", alias, node.ID, platform, node.ConnectedAt.Local().Format(time.RFC3339))
 	}
 	return writer.Flush()
+}
+
+func runClaim(ctx context.Context, apiClient *client.Client, arguments []string) error {
+	if len(arguments) != 2 {
+		return errors.New("usage: ari claim NODE_ID ALIAS")
+	}
+	node, err := apiClient.Claim(ctx, arguments[0], arguments[1])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("claimed %s as %s\n", node.ID, node.Alias)
+	return nil
 }
 
 func runExec(ctx context.Context, apiClient *client.Client, arguments []string) (int, error) {
@@ -193,10 +220,12 @@ func runProxy(ctx context.Context, apiClient *client.Client, arguments []string)
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, `Usage:
   ari [global flags] nodes
+  ari [global flags] claim NODE_ID ALIAS
   ari [global flags] exec [--cwd DIR] [--timeout DURATION] TARGET -- COMMAND [ARG...]
   ari [global flags] shell TARGET
   ari [global flags] proxy TARGET
 
-Global flags must appear before the command. Use "ari proxy %h" as an
-OpenSSH ProxyCommand.`)
+Global flags must appear before the command. Use --relay-ssh breakglass@HOST
+for the private management plane, or "ari proxy %h" as an OpenSSH
+ProxyCommand.`)
 }

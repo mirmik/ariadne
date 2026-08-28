@@ -17,13 +17,11 @@ import (
 
 type Config struct {
 	RelayURL   string
-	Token      string
 	HTTPClient *http.Client
 }
 
 type Client struct {
 	baseURL    *url.URL
-	token      string
 	httpClient *http.Client
 }
 
@@ -50,7 +48,7 @@ func New(config Config) (*Client, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{baseURL: baseURL, token: config.Token, httpClient: httpClient}, nil
+	return &Client{baseURL: baseURL, httpClient: httpClient}, nil
 }
 
 func (client *Client) Nodes(ctx context.Context) ([]wire.NodeInfo, error) {
@@ -71,6 +69,35 @@ func (client *Client) Nodes(ctx context.Context) ([]wire.NodeInfo, error) {
 		return nil, fmt.Errorf("decode node list: %w", err)
 	}
 	return nodesResponse.Nodes, nil
+}
+
+func (client *Client) Claim(ctx context.Context, nodeID, alias string) (wire.NodeInfo, error) {
+	if nodeID == "" || alias == "" {
+		return wire.NodeInfo{}, errors.New("node ID and alias are required")
+	}
+	body, err := json.Marshal(wire.ClaimRequest{Alias: alias})
+	if err != nil {
+		return wire.NodeInfo{}, fmt.Errorf("encode claim request: %w", err)
+	}
+	path := "/v1/nodes/" + url.PathEscape(nodeID) + "/claim"
+	request, err := client.request(ctx, http.MethodPost, path, bytes.NewReader(body))
+	if err != nil {
+		return wire.NodeInfo{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return wire.NodeInfo{}, fmt.Errorf("claim node alias: %w", err)
+	}
+	defer response.Body.Close()
+	if err := decodeHTTPError(response); err != nil {
+		return wire.NodeInfo{}, err
+	}
+	var node wire.NodeInfo
+	if err := decodeJSON(response.Body, &node); err != nil {
+		return wire.NodeInfo{}, fmt.Errorf("decode claimed node: %w", err)
+	}
+	return node, nil
 }
 
 func (client *Client) Exec(ctx context.Context, target string, execRequest wire.ExecRequest) (wire.ExecResult, error) {
@@ -140,9 +167,6 @@ func (client *Client) dialStream(ctx context.Context, target, protocol string, e
 	if headers == nil {
 		headers = make(http.Header)
 	}
-	if client.token != "" {
-		headers.Set("Authorization", "Bearer "+client.token)
-	}
 	connection, response, err := websocket.Dial(ctx, endpoint.String(), &websocket.DialOptions{
 		HTTPClient:      client.httpClient,
 		HTTPHeader:      headers,
@@ -164,9 +188,6 @@ func (client *Client) request(ctx context.Context, method, path string, body io.
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/json")
-	if client.token != "" {
-		request.Header.Set("Authorization", "Bearer "+client.token)
-	}
 	return request, nil
 }
 

@@ -4,14 +4,25 @@
 
 ## Transport и endpoints
 
+Node plane по умолчанию использует отдельный порт `47471` и содержит только:
+
 - `GET /v1/connect` — постоянный WebSocket connector → relay;
+- `GET /healthz` — health endpoint.
+
+Management plane по умолчанию слушает `127.0.0.1:8088` и содержит:
+
 - `GET /v1/nodes` — список online-узлов;
+- `POST /v1/nodes/{node_id}/claim` — назначение доверенного alias с management plane;
 - `POST /v1/nodes/{target}/exec` — структурированный exec;
 - `GET /v1/nodes/{target}/streams/shell` — WebSocket до встроенного одноразового SSH endpoint;
 - `GET /v1/nodes/{target}/streams/ssh` — опциональный WebSocket byte-stream до внешнего локального `sshd`;
-- `GET /healthz` — незакрытый health endpoint.
+- `GET /healthz` — health endpoint.
 
-Все endpoints, кроме `/healthz`, требуют `Authorization: Bearer …`, если relay не запущен в явно небезопасном режиме. В production используется HTTPS/WSS.
+Node plane не требует предварительно доставленного bearer token: connector доказывает владение своей Ed25519 identity во время handshake. Он не предоставляет endpoints для управления. Management plane также не использует bearer token и поэтому обязан оставаться на loopback либо быть доступным через независимо аутентифицированный транспорт, например ограниченный SSH tunnel. Публичный node plane использует HTTPS/WSS.
+
+Типичный bootstrap не публикует node port через роутер: `ariadne-connector --relay-ssh breakglass@HOST` создаёт SSH local forward до relay `127.0.0.1:47471` и подключает WebSocket через него. Прямая публикация node plane на TCP `47471` с TLS остаётся альтернативой. Management client `ari` обычно работает во внутренней доверенной сети; для non-loopback management listener требуется явный `--allow-management-network`, а SSH tunnel mode `ari` является вспомогательным.
+
+Переданный connector alias является недоверенной подсказкой. В списке узлов он имеет `alias_claimed: false` и не участвует в lookup. Management plane может связать alias с точным `node_id` через `/claim`; только такой alias разрешено использовать как target. Claims сохраняются после reconnect той же identity, но в v1 теряются при перезапуске relay.
 
 ## Регистрация connector
 
@@ -31,7 +42,7 @@ Handshake:
 1. Connector отправляет `connector.hello`: `node_id`, alias, Ed25519 public key, встроенный SSH host key, platform, architecture и версию.
 2. Relay проверяет, что `node_id` получен из public key, и отвечает случайным `relay.challenge`.
 3. Connector подписывает domain-separated transcript, включающий challenge и все поля hello, и отправляет `connector.register`.
-4. Relay проверяет Ed25519 signature, резервирует alias и отвечает `relay.registered`.
+4. Relay проверяет Ed25519 signature, регистрирует live identity и отвечает `relay.registered`.
 
 Приватный ключ никогда не покидает узел. Challenge не даёт повторно воспроизвести перехваченную регистрацию. `ssh_host_key` входит в подписываемый transcript: relay не принимает его замену без новой корректной подписи node identity.
 
@@ -53,7 +64,7 @@ Connector запускает `argv` напрямую и отвечает `exec.r
 
 stdout и stderr являются byte strings и кодируются стандартным JSON base64, поэтому бинарный вывод не повреждается.
 
-По умолчанию connector передаёт процессу только небольшой allowlist переменных окружения; bearer token напрямую не наследуется командой. Это не создаёт security boundary: команда работает с тем же OS UID и в зависимости от платформы может исследовать другие процессы и доступные им файлы. Настоящая изоляция credentials требует отдельного UID или sandbox. Вывод ограничен отдельно для stdout и stderr.
+По умолчанию connector передаёт процессу только небольшой allowlist переменных окружения. Это не создаёт security boundary: команда работает с тем же OS UID и в зависимости от платформы может исследовать другие процессы и доступные им файлы. Настоящая изоляция требует отдельного UID или sandbox. Вывод ограничен отдельно для stdout и stderr.
 
 ## Встроенный SSH shell
 
@@ -83,6 +94,8 @@ bytes 18..   opaque stream payload, at most 64 KiB
 
 Сообщения `stream.close` и `stream.error` управляют жизненным циклом. Несколько SSH-сессий используют одно connector-соединение и различаются stream ID.
 
+Connector является строго реактивной стороной после регистрации. `exec.result` принимается только для существующего relay request ID, а stream state и бинарные frames — только для stream ID, ранее созданного management plane. Unsolicited result или никогда не выдававшийся relay stream ID считаются нарушением протокола и закрывают node connection; запоздалые frames уже закрытого, но ранее выданного stream безопасно отбрасываются.
+
 Клиентский WebSocket содержит только payload bytes без внутреннего заголовка. `ari shell` передаёт его встроенному Go SSH client, а `ari proxy` преобразует в обычный stdin/stdout byte-stream для OpenSSH `ProxyCommand`.
 
 ## Неизменяемые ограничения v1
@@ -92,5 +105,5 @@ bytes 18..   opaque stream payload, at most 64 KiB
 - alias соответствует `[A-Za-z0-9][A-Za-z0-9._-]{0,62}` и сравнивается без учёта регистра;
 - node identity — Ed25519 public key, `node_id` — 160 бит SHA-256 digest в base32;
 - встроенные SSH host key и одноразовые client keys — Ed25519;
-- duplicate alias разных identities отклоняется;
+- сообщённые aliases могут повторяться и не участвуют в lookup; claimed alias уникален без учёта регистра;
 - reconnect той же identity заменяет старую live-сессию.

@@ -73,6 +73,7 @@ type Registered struct {
 type NodeInfo struct {
 	ID               string    `json:"id"`
 	Alias            string    `json:"alias"`
+	AliasClaimed     bool      `json:"alias_claimed"`
 	SSHHostKey       string    `json:"ssh_host_key"`
 	Platform         string    `json:"platform"`
 	Architecture     string    `json:"architecture"`
@@ -83,6 +84,10 @@ type NodeInfo struct {
 
 type NodesResponse struct {
 	Nodes []NodeInfo `json:"nodes"`
+}
+
+type ClaimRequest struct {
+	Alias string `json:"alias"`
 }
 
 type ExecRequest struct {

@@ -17,6 +17,7 @@ import (
 type nodeSession struct {
 	server *Server
 	conn   *websocket.Conn
+	infoMu sync.RWMutex
 	info   wire.NodeInfo
 
 	done      chan struct{}
@@ -31,6 +32,20 @@ type nodeSession struct {
 
 	streamsMu sync.RWMutex
 	streams   map[string]*relayStream
+	known     map[string]struct{}
+}
+
+func (session *nodeSession) nodeInfo() wire.NodeInfo {
+	session.infoMu.RLock()
+	defer session.infoMu.RUnlock()
+	return session.info
+}
+
+func (session *nodeSession) setClaimedAlias(alias string) {
+	session.infoMu.Lock()
+	session.info.Alias = alias
+	session.info.AliasClaimed = true
+	session.infoMu.Unlock()
 }
 
 func newNodeSession(server *Server, connection *websocket.Conn, info wire.NodeInfo) *nodeSession {
@@ -41,6 +56,7 @@ func newNodeSession(server *Server, connection *websocket.Conn, info wire.NodeIn
 		done:    make(chan struct{}),
 		pending: make(map[string]chan wire.ExecResult),
 		streams: make(map[string]*relayStream),
+		known:   make(map[string]struct{}),
 	}
 }
 
@@ -67,9 +83,14 @@ func (session *nodeSession) run() error {
 			if err != nil {
 				return err
 			}
-			if stream := session.stream(streamID); stream != nil {
-				stream.deliver(payload)
+			stream := session.stream(streamID)
+			if stream == nil {
+				if session.knownStream(streamID) {
+					continue
+				}
+				return fmt.Errorf("connector sent data for unknown stream %s", streamID)
 			}
+			stream.deliver(payload)
 		default:
 			return fmt.Errorf("unsupported WebSocket message type %d", messageType)
 		}
@@ -88,12 +109,16 @@ func (session *nodeSession) handleControl(envelope wire.Envelope) error {
 		}
 		session.pendingMu.Lock()
 		resultChannel := session.pending[envelope.ID]
-		session.pendingMu.Unlock()
 		if resultChannel != nil {
-			select {
-			case resultChannel <- result:
-			default:
-			}
+			delete(session.pending, envelope.ID)
+		}
+		session.pendingMu.Unlock()
+		if resultChannel == nil {
+			return fmt.Errorf("connector sent an unsolicited exec result for request %s", envelope.ID)
+		}
+		select {
+		case resultChannel <- result:
+		default:
 		}
 		return nil
 
@@ -104,7 +129,10 @@ func (session *nodeSession) handleControl(envelope wire.Envelope) error {
 		}
 		stream := session.stream(state.StreamID)
 		if stream == nil {
-			return nil
+			if session.knownStream(state.StreamID) {
+				return nil
+			}
+			return fmt.Errorf("connector sent state for unknown stream %s", state.StreamID)
 		}
 		switch envelope.Type {
 		case wire.MessageStreamOpened:
@@ -215,6 +243,7 @@ func (session *nodeSession) addStream(stream *relayStream) error {
 		return errors.New("stream ID collision")
 	}
 	session.streams[stream.id] = stream
+	session.known[stream.id] = struct{}{}
 	return nil
 }
 
@@ -230,6 +259,13 @@ func (session *nodeSession) stream(id string) *relayStream {
 	session.streamsMu.RLock()
 	defer session.streamsMu.RUnlock()
 	return session.streams[id]
+}
+
+func (session *nodeSession) knownStream(id string) bool {
+	session.streamsMu.RLock()
+	defer session.streamsMu.RUnlock()
+	_, known := session.known[id]
+	return known
 }
 
 func (session *nodeSession) close(reason error) {

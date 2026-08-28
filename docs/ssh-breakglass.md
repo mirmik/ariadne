@@ -8,10 +8,14 @@
 
 ```bash
 task build
-sudo ./scripts/install-ssh-breakglass --admin-user trusted-admin
+sudo ./scripts/install-ssh-breakglass \
+  --admin-user trusted-admin \
+  --login-as working-user
 ```
 
-Замените `trusted-admin` на серверную учётную запись, ключ которой находится на телефоне. Скрипт идемпотентно создаёт пользователя `breakglass`, блокирует его пароль, устанавливает бинарник, SSH drop-in, boot unit и опциональное ограниченное правило sudoers. Он проверяет синтаксис и эффективную конфигурацию `sshd` до reload; при ошибке восстанавливает прежний drop-in.
+Замените `trusted-admin` на серверную учётную запись, ключ которой находится на телефоне, а `working-user` — на учётную запись, в которой находятся нужные файлы. Если это один пользователь, `--login-as` можно опустить: он по умолчанию принимает значение `--admin-user`.
+
+Скрипт идемпотентно создаёт пользователя `breakglass`, блокирует его пароль, устанавливает бинарник, SSH drop-in, boot unit и ограниченные правила sudoers. Он проверяет синтаксис и эффективную конфигурацию `sshd` до reload; при ошибке восстанавливает прежний drop-in.
 
 Ниже приведены те же действия для ручной установки.
 
@@ -46,7 +50,8 @@ Match User breakglass
     AuthenticationMethods password
     PubkeyAuthentication no
     AllowAgentForwarding no
-    AllowTcpForwarding no
+    AllowTcpForwarding local
+    PermitOpen 127.0.0.1:47471 127.0.0.1:8088
     X11Forwarding no
     PermitTunnel no
     PermitUserRC no
@@ -108,6 +113,47 @@ ssh server sudo /usr/local/sbin/ssh-breakglass enable --ttl 15m
 ssh breakglass@server
 ```
 
+После входа перейдите в рабочую учётную запись:
+
+```bash
+sudo -iu working-user
+```
+
+Это даёт сессии права и домашний каталог `working-user`, но не предоставляет отдельного root-доступа. Если рабочая учётная запись сама имеет дополнительные права sudo, продолжает действовать её обычная политика sudo.
+
+Аккаунту разрешены только два local forwarding destination Ariadne:
+
+- node plane `127.0.0.1:47471` — основной tunnel внешнего connector;
+- management plane `127.0.0.1:8088` — вспомогательный разовый tunnel для `ari`.
+
+Основной сценарий запуска connector на внешней машине:
+
+```bash
+ariadne-connector --relay-ssh breakglass@server --alias phone
+```
+
+Ручной эквивалент node tunnel:
+
+```bash
+ssh -N -T -L 127.0.0.1:17471:127.0.0.1:47471 breakglass@server
+ariadne-connector --relay http://127.0.0.1:17471 --alias phone
+```
+
+Вспомогательный management tunnel:
+
+```bash
+ssh -N -T -L 127.0.0.1:18088:127.0.0.1:8088 breakglass@server
+```
+
+Произвольные SSH-туннели остаются запрещены директивой `PermitOpen`.
+
+CLI `ari` может управлять вспомогательным tunnel автоматически:
+
+```bash
+ari --relay-ssh breakglass@server nodes
+ari --relay-ssh breakglass@server shell TARGET
+```
+
 Пароль автоматически блокируется по окончании TTL. Открытая SSH-сессия продолжает работать; новые входы перестают приниматься. Досрочное закрытие и проверка состояния:
 
 ```bash
@@ -123,7 +169,13 @@ trusted-admin ALL=(root) NOPASSWD: /usr/local/sbin/ssh-breakglass
 
 Утилита намеренно управляет только фиксированным пользователем `breakglass`, поэтому это правило нельзя использовать для смены или блокировки пароля другого аккаунта. `trusted-admin` не должен иметь возможности менять бинарник или каталог `/usr/local/sbin`.
 
-Если аварийная сессия должна позволять администрирование, выдайте `breakglass` только необходимые команды через отдельное правило sudoers. Полный доступ тоже возможен, но тогда любой вход в течение открытого окна фактически даёт root:
+Чтобы разрешить переход из аварийной сессии в рабочую учётную запись без root, установщик создаёт эквивалент такого правила:
+
+```sudoers
+breakglass ALL=(working-user) NOPASSWD: ALL
+```
+
+Если аварийная сессия должна позволять полное администрирование, root следует выдавать отдельным осознанным правилом. Тогда любой вход в течение открытого окна фактически даёт root:
 
 ```sudoers
 breakglass ALL=(ALL:ALL) ALL
