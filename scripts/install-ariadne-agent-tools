@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+bin_dir=${XDG_BIN_HOME:-"$HOME/.local/bin"}
+skill_root=${ARIADNE_SKILL_ROOT:-"$HOME/.agents/skills"}
+skill_source="$repo_dir/skills/ariadne-remote"
+skill_target="$skill_root/ariadne-remote"
+
+mkdir -p "$bin_dir" "$skill_root"
+(cd "$repo_dir" && go build -trimpath -o "$bin_dir/ariadne-mcp" ./cmd/ariadne-mcp)
+
+if [ -L "$skill_target" ]; then
+    current_target=$(readlink "$skill_target")
+    if [ "$current_target" != "$skill_source" ]; then
+        echo "Refusing to replace existing skill symlink: $skill_target -> $current_target" >&2
+        exit 1
+    fi
+elif [ -e "$skill_target" ]; then
+    echo "Refusing to replace existing skill path: $skill_target" >&2
+    exit 1
+else
+    ln -s "$skill_source" "$skill_target"
+fi
+
+if command -v codex >/dev/null 2>&1; then
+    if codex mcp get ariadne >/dev/null 2>&1; then
+        echo "Codex MCP server 'ariadne' is already configured; leaving it unchanged."
+    else
+        codex mcp add ariadne -- "$bin_dir/ariadne-mcp"
+    fi
+else
+    echo "Codex CLI is not installed; register this stdio command in your MCP client:" >&2
+    echo "  $bin_dir/ariadne-mcp" >&2
+fi
+
+echo "Installed MCP binary: $bin_dir/ariadne-mcp"
+echo "Installed skill: $skill_target"
+echo "For commands longer than 60 seconds, set mcp_servers.ariadne.tool_timeout_sec = 660 in Codex config.toml."

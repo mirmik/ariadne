@@ -1,4 +1,4 @@
-name: Release connector
+name: Release Ariadne
 
 on:
   push:
@@ -41,18 +41,35 @@ jobs:
           - goos: windows
             goarch: amd64
             asset: ariadne-connector-windows-amd64.exe
+            package: ./cmd/ariadne-connector
           - goos: windows
             goarch: arm64
             asset: ariadne-connector-windows-arm64.exe
+            package: ./cmd/ariadne-connector
           - goos: linux
             goarch: amd64
             asset: ariadne-connector-linux-amd64
+            package: ./cmd/ariadne-connector
           - goos: linux
             goarch: arm64
             asset: ariadne-connector-linux-arm64
+            package: ./cmd/ariadne-connector
           - goos: android
             goarch: arm64
             asset: ariadne-connector-android-arm64
+            package: ./cmd/ariadne-connector
+          - goos: linux
+            goarch: amd64
+            asset: ariadne-mcp-linux-amd64
+            package: ./cmd/ariadne-mcp
+          - goos: linux
+            goarch: arm64
+            asset: ariadne-mcp-linux-arm64
+            package: ./cmd/ariadne-mcp
+          - goos: windows
+            goarch: amd64
+            asset: ariadne-mcp-windows-amd64.exe
+            package: ./cmd/ariadne-mcp
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -71,7 +88,7 @@ jobs:
           go build -trimpath \
             -ldflags "-s -w -X main.version=${RELEASE_TAG}" \
             -o "dist/${{ matrix.asset }}" \
-            ./cmd/ariadne-connector
+            ${{ matrix.package }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.asset }}

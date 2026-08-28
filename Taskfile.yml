@@ -47,10 +47,11 @@ tasks:
       - task: build
 
   build:
-    desc: Build the local CLI, relay, connector, and break-glass utility
+    desc: Build the local CLI, MCP server, relay, connector, and break-glass utility
     cmds:
       - mkdir -p "{{.BIN_DIR}}"
       - go build -o "{{.BIN_DIR}}/ari" ./cmd/ari
+      - go build -o "{{.BIN_DIR}}/ariadne-mcp" ./cmd/ariadne-mcp
       - go build -o "{{.BIN_DIR}}/ariadne-relay" ./cmd/ariadne-relay
       - go build -o "{{.BIN_DIR}}/ariadne-connector" ./cmd/ariadne-connector
       - go build -o "{{.BIN_DIR}}/ssh-breakglass" ./cmd/ssh-breakglass
@@ -81,6 +82,11 @@ tasks:
     desc: Build and run the relay
     deps: [build]
     cmd: '"{{.BIN_DIR}}/ariadne-relay" --management-listen "{{.MANAGEMENT_LISTEN}}" --node-listen "{{.NODE_LISTEN}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} {{.CLI_ARGS}}'
+
+  mcp:
+    desc: Run the Ariadne stdio MCP server
+    deps: [build]
+    cmd: '"{{.BIN_DIR}}/ariadne-mcp" --relay "{{.MANAGEMENT_RELAY}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} {{.CLI_ARGS}}'
 
   connector:
     desc: Build and run a connector (NODE_ALIAS=phone by default)

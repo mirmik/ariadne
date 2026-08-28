@@ -1,0 +1,14 @@
+interface:
+  display_name: "Ariadne Remote"
+  short_description: "Work on remote nodes through Ariadne MCP"
+  default_prompt: "Use $ariadne-remote to inspect or operate the requested Ariadne node."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "ariadne"
+      description: "Ariadne remote node management tools"
+      transport: "stdio"
+
+policy:
+  allow_implicit_invocation: true

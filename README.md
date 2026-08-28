@@ -121,6 +121,30 @@ task build:android
 ./bin/ari shell phone
 ```
 
+## MCP и skill для агентов
+
+`ariadne-mcp` предоставляет management plane как локальный stdio MCP без shell-вызовов `ari`:
+
+- `ariadne_nodes` — живые ноды, platform и статус доверенного alias;
+- `ariadne_claim` — привязка alias к точному `node_id`;
+- `ariadne_exec` — прямой `argv`, remote `cwd`, timeout и структурированные stdout/stderr/exit code.
+
+MCP запускается рядом с relay, читает тот же локальный management token и не передаёт его connector. Интерактивный shell не включён в MCP: stdio занят протоколом, а агентские операции должны использовать structured exec.
+
+Для Codex соберите MCP, установите user-wide skill и зарегистрируйте сервер одной командой:
+
+```bash
+./scripts/install-ariadne-agent-tools
+```
+
+Skill устанавливается как ссылка в `~/.agents/skills/ariadne-remote`, а MCP-бинарник — в `~/.local/bin/ariadne-mcp`. Codex CLI, IDE extension и desktop app используют общую MCP-конфигурацию. Для remote-команд дольше стандартных 60 секунд установите `mcp_servers.ariadne.tool_timeout_sec = 660` в `~/.codex/config.toml`.
+
+Ручной запуск для другого MCP-клиента:
+
+```bash
+./bin/ariadne-mcp
+```
+
 Identity connector создаётся один раз в пользовательском config-каталоге с правами `0600`. `node_id` является хешем публичного ключа и не меняется после reconnect. Стабильный SSH host key детерминированно и с отдельным domain label выводится из этой identity, но не переиспользует сам identity key.
 
 При первом запуске relay создаёт отдельный 256-bit management token в
