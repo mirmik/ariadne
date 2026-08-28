@@ -43,12 +43,13 @@ tasks:
       - task: build
 
   build:
-    desc: Build the local CLI, relay, and connector
+    desc: Build the local CLI, relay, connector, and break-glass utility
     cmds:
       - mkdir -p "{{.BIN_DIR}}"
       - go build -o "{{.BIN_DIR}}/ari" ./cmd/ari
       - go build -o "{{.BIN_DIR}}/ariadne-relay" ./cmd/ariadne-relay
       - go build -o "{{.BIN_DIR}}/ariadne-connector" ./cmd/ariadne-connector
+      - go build -o "{{.BIN_DIR}}/ssh-breakglass" ./cmd/ssh-breakglass
 
   build:android:
     desc: Build the connector and CLI for Android/Termux (ARCH=arm64 by default)

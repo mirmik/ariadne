@@ -1,0 +1,10 @@
+[Unit]
+Description=Lock the SSH break-glass password at boot
+Before=ssh.service sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ssh-breakglass disable
+
+[Install]
+WantedBy=multi-user.target

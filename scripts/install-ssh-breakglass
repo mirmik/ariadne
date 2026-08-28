@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+breakglass_user="breakglass"
+admin_user=""
+binary_path=""
+
+usage() {
+    cat <<'EOF'
+Usage:
+  sudo ./scripts/install-ssh-breakglass [--admin-user USER] [--binary PATH]
+
+Options:
+  --admin-user USER  Allow this existing user to run ssh-breakglass via sudo
+                      without a password (normally the account used by phone).
+  --binary PATH      Install this prebuilt binary instead of bin/ssh-breakglass.
+EOF
+}
+
+while (($# > 0)); do
+    case "$1" in
+        --admin-user)
+            (($# >= 2)) || { echo "missing value for --admin-user" >&2; exit 2; }
+            admin_user="$2"
+            shift 2
+            ;;
+        --binary)
+            (($# >= 2)) || { echo "missing value for --binary" >&2; exit 2; }
+            binary_path="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ ${EUID} -ne 0 ]]; then
+    echo "install-ssh-breakglass must run as root (use sudo)" >&2
+    exit 1
+fi
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+if [[ -z ${binary_path} ]]; then
+    binary_path="${repo_root}/bin/ssh-breakglass"
+fi
+
+ssh_dropin_source="${repo_root}/deploy/ssh-breakglass/00-breakglass.conf"
+boot_unit_source="${repo_root}/deploy/ssh-breakglass/ssh-breakglass-lock.service"
+ssh_dropin_target="/etc/ssh/sshd_config.d/00-breakglass.conf"
+boot_unit_target="/etc/systemd/system/ssh-breakglass-lock.service"
+installed_binary="/usr/local/sbin/ssh-breakglass"
+
+for required_file in "${binary_path}" "${ssh_dropin_source}" "${boot_unit_source}"; do
+    if [[ ! -f ${required_file} ]]; then
+        echo "required file not found: ${required_file}" >&2
+        if [[ ${required_file} == "${binary_path}" ]]; then
+            echo "build it first with: task build" >&2
+        fi
+        exit 1
+    fi
+done
+
+for command_name in useradd passwd sshd systemctl install getent mktemp grep; do
+    command -v "${command_name}" >/dev/null || {
+        echo "required command not found: ${command_name}" >&2
+        exit 1
+    }
+done
+
+if [[ -n ${admin_user} ]]; then
+    if [[ ${admin_user} == root ]] || ! getent passwd "${admin_user}" >/dev/null; then
+        echo "--admin-user must name an existing non-root user" >&2
+        exit 1
+    fi
+    command -v visudo >/dev/null || {
+        echo "visudo is required to install the sudoers rule" >&2
+        exit 1
+    }
+fi
+
+if ! getent passwd "${breakglass_user}" >/dev/null; then
+    useradd --create-home --shell /bin/bash "${breakglass_user}"
+    echo "created user ${breakglass_user}"
+else
+    echo "user ${breakglass_user} already exists"
+fi
+
+# Installation always starts from the safe, locked state.
+passwd -l "${breakglass_user}" >/dev/null
+install -o root -g root -m 0755 "${binary_path}" "${installed_binary}"
+
+backup_dir="$(mktemp -d /tmp/ssh-breakglass-install.XXXXXX)"
+cleanup() {
+    rm -rf -- "${backup_dir}"
+}
+trap cleanup EXIT
+
+had_previous_dropin=false
+if [[ -e ${ssh_dropin_target} ]]; then
+    cp -a -- "${ssh_dropin_target}" "${backup_dir}/00-breakglass.conf"
+    had_previous_dropin=true
+fi
+
+rollback_dropin() {
+    if [[ ${had_previous_dropin} == true ]]; then
+        install -o root -g root -m 0644 "${backup_dir}/00-breakglass.conf" "${ssh_dropin_target}"
+    else
+        rm -f -- "${ssh_dropin_target}"
+    fi
+}
+
+install -d -o root -g root -m 0755 /etc/ssh/sshd_config.d
+install -o root -g root -m 0644 "${ssh_dropin_source}" "${ssh_dropin_target}"
+
+if ! sshd -t; then
+    echo "new SSH configuration is invalid; restoring the previous drop-in" >&2
+    rollback_dropin
+    exit 1
+fi
+
+if ! effective_config="$(sshd -T -C user=${breakglass_user},host=localhost,addr=127.0.0.1)"; then
+    echo "could not evaluate the new SSH configuration; restoring the previous drop-in" >&2
+    rollback_dropin
+    exit 1
+fi
+for expected_setting in \
+    "authenticationmethods password" \
+    "passwordauthentication yes" \
+    "kbdinteractiveauthentication no" \
+    "pubkeyauthentication no"; do
+    if ! grep -qx -- "${expected_setting}" <<<"${effective_config}"; then
+        echo "effective SSH configuration is missing: ${expected_setting}" >&2
+        echo "restoring the previous drop-in" >&2
+        rollback_dropin
+        exit 1
+    fi
+done
+
+install -o root -g root -m 0644 "${boot_unit_source}" "${boot_unit_target}"
+systemctl daemon-reload
+systemctl enable ssh-breakglass-lock.service >/dev/null
+"${installed_binary}" disable >/dev/null
+
+if systemctl reload ssh.service 2>/dev/null; then
+    :
+elif systemctl reload sshd.service 2>/dev/null; then
+    :
+else
+    echo "could not reload ssh.service or sshd.service" >&2
+    echo "the configuration is valid but has not been activated" >&2
+    exit 1
+fi
+
+if [[ -n ${admin_user} ]]; then
+    sudoers_target="/etc/sudoers.d/ssh-breakglass-${admin_user}"
+    sudoers_temporary="${backup_dir}/sudoers"
+    printf '%s ALL=(root) NOPASSWD: %s\n' "${admin_user}" "${installed_binary}" >"${sudoers_temporary}"
+    chmod 0440 "${sudoers_temporary}"
+    visudo -cf "${sudoers_temporary}" >/dev/null
+    install -o root -g root -m 0440 "${sudoers_temporary}" "${sudoers_target}"
+    echo "installed sudoers rule for ${admin_user}"
+fi
+
+echo
+echo "ssh-breakglass is installed and password login is currently locked."
+echo "Keep this session open and enable a test window with:"
+echo "  sudo ${installed_binary} enable --ttl 15m"
+echo "Then test from a second terminal with:"
+echo "  ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password ${breakglass_user}@SERVER"
