@@ -4,15 +4,26 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -43,6 +54,8 @@ jobs:
             asset: ariadne-connector-android-arm64
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -55,7 +68,7 @@ jobs:
         run: |
           mkdir -p dist
           go build -trimpath \
-            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -ldflags "-s -w -X main.version=${RELEASE_TAG}" \
             -o "dist/${{ matrix.asset }}" \
             ./cmd/ariadne-connector
       - uses: actions/upload-artifact@v4
@@ -78,9 +91,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "${GITHUB_REF_NAME}" dist/*
+          gh release create "${RELEASE_TAG}" dist/*
           --repo "${GITHUB_REPOSITORY}"
           --verify-tag
           --generate-notes
           --prerelease
-          --title "Ariadne ${GITHUB_REF_NAME}"
+          --title "Ariadne ${RELEASE_TAG}"
