@@ -4,10 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"os/exec"
-	"runtime"
-	"strings"
 	"time"
 
 	"github.com/mirmik/ariadne/internal/wire"
@@ -47,8 +44,6 @@ func (executor LocalExecutor) Execute(ctx context.Context, request wire.ExecRequ
 	command.Stderr = stderr
 	if executor.Environment != nil {
 		command.Env = append([]string(nil), executor.Environment...)
-	} else {
-		command.Env = safeEnvironment(os.Environ())
 	}
 
 	err := command.Run()
@@ -114,59 +109,4 @@ func (buffer *cappedBuffer) Bytes() []byte {
 
 func (buffer *cappedBuffer) Truncated() bool {
 	return buffer.truncated
-}
-
-func safeEnvironment(environment []string) []string {
-	return safeEnvironmentForOS(environment, runtime.GOOS)
-}
-
-func safeEnvironmentForOS(environment []string, targetOS string) []string {
-	allowed := map[string]struct{}{
-		"ANDROID_DATA":      {},
-		"ANDROID_ROOT":      {},
-		"APPDATA":           {},
-		"COMSPEC":           {},
-		"EXTERNAL_STORAGE":  {},
-		"HOME":              {},
-		"HOMEDRIVE":         {},
-		"HOMEPATH":          {},
-		"LANG":              {},
-		"LC_ALL":            {},
-		"LC_CTYPE":          {},
-		"LOCALAPPDATA":      {},
-		"LOGNAME":           {},
-		"PATH":              {},
-		"PATHEXT":           {},
-		"PREFIX":            {},
-		"PROGRAMDATA":       {},
-		"PROGRAMFILES":      {},
-		"PROGRAMFILES(X86)": {},
-		"PROGRAMW6432":      {},
-		"SHELL":             {},
-		"SYSTEMDRIVE":       {},
-		"SYSTEMROOT":        {},
-		"TERM":              {},
-		"TMP":               {},
-		"TMPDIR":            {},
-		"TEMP":              {},
-		"USER":              {},
-		"USERNAME":          {},
-		"USERPROFILE":       {},
-		"WINDIR":            {},
-	}
-	filtered := make([]string, 0, len(environment))
-	for _, item := range environment {
-		name, _, found := strings.Cut(item, "=")
-		if !found {
-			continue
-		}
-		lookupName := name
-		if targetOS == "windows" {
-			lookupName = strings.ToUpper(name)
-		}
-		if _, ok := allowed[lookupName]; ok || strings.HasPrefix(lookupName, "LC_") {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
 }

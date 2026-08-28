@@ -57,7 +57,7 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 			"HOME=" + t.TempDir(),
 			"PATH=/usr/bin:/bin",
 			"SHELL=/bin/sh",
-			"ARIADNE_PRIVATE=must-not-leak",
+			"ARIADNE_INHERITED=test-value",
 		},
 		HTTPClient: nodeServer.Client(),
 		Logger:     logger,
@@ -172,7 +172,7 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	if err := shellSession.Shell(); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(stdinWriter, "stty size\nprintf 'PRIVATE=<%s>\\n' \"$ARIADNE_PRIVATE\"\n")
+	_, _ = io.WriteString(stdinWriter, "stty size\nprintf 'INHERITED=<%s>\\n' \"$ARIADNE_INHERITED\"\n")
 	waitForOutput(t, output, "24 80")
 	if err := shellSession.WindowChange(40, 100); err != nil {
 		t.Fatal(err)
@@ -186,8 +186,8 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	if !strings.Contains(output.String(), "40 100") {
 		t.Fatalf("PTY resize was not observed; output=%q", output.String())
 	}
-	if strings.Contains(output.String(), "must-not-leak") || !strings.Contains(output.String(), "PRIVATE=<>") {
-		t.Fatalf("connector private environment leaked into shell; output=%q", output.String())
+	if !strings.Contains(output.String(), "INHERITED=<test-value>") {
+		t.Fatalf("connector environment was not inherited by shell; output=%q", output.String())
 	}
 
 	nonPTYSigner := newSSHSigner(t)

@@ -64,7 +64,7 @@ Connector запускает `argv` напрямую и отвечает `exec.r
 
 stdout и stderr являются byte strings и кодируются стандартным JSON base64, поэтому бинарный вывод не повреждается.
 
-По умолчанию connector передаёт процессу только небольшой allowlist переменных окружения. Это не создаёт security boundary: команда работает с тем же OS UID и в зависимости от платформы может исследовать другие процессы и доступные им файлы. Настоящая изоляция требует отдельного UID или sandbox. Вывод ограничен отдельно для stdout и stderr.
+Connector передаёт процессу своё окружение целиком, чтобы системные и toolchain-команды работали так же, как при локальном запуске. Environment не является security boundary: команда работает с тем же OS UID и в зависимости от платформы может исследовать другие процессы и доступные им файлы. Connector не следует запускать с секретами в environment; настоящая изоляция требует отдельного UID или sandbox. Вывод ограничен отдельно для stdout и stderr.
 
 ## Встроенный SSH shell
 
@@ -77,7 +77,7 @@ stdout и stderr являются byte strings и кодируются стан�
 5. CLI использует `ssh.FixedHostKey` с ключом из handshake relay. Режим, эквивалентный `InsecureIgnoreHostKey`, не используется.
 6. После SSH handshake connector обслуживает один `session` channel: `pty-req`, `shell`, `window-change`, ограниченный набор `signal` и `exit-status`.
 
-При PTY shell запускается на pseudo-terminal с переданными размерами; без PTY stdin/stdout/stderr подключаются напрямую. Процесс работает с UID connector и получает тот же безопасный allowlist окружения, что и structured exec. SSH-шифрование находится внутри внешнего HTTPS/WSS transport; relay видит routing metadata и публичные ключи, но не расшифровывает SSH payload.
+При PTY shell запускается на pseudo-terminal с переданными размерами; без PTY stdin/stdout/stderr подключаются напрямую. Процесс работает с UID connector и наследует то же окружение, что и structured exec. SSH-шифрование находится внутри внешнего HTTPS/WSS transport; relay видит routing metadata и публичные ключи, но не расшифровывает SSH payload.
 
 ## Мультиплексированные stream frames
 

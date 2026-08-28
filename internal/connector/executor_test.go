@@ -49,38 +49,15 @@ func TestLocalExecutorHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestSafeEnvironmentDropsCredentials(t *testing.T) {
-	filtered := safeEnvironment([]string{
-		"PATH=/bin",
-		"LC_TEST=value",
-		"ARIADNE_PRIVATE=secret",
-		"DATABASE_PASSWORD=secret",
-	})
-	joined := strings.Join(filtered, "\n")
-	if !strings.Contains(joined, "PATH=/bin") || !strings.Contains(joined, "LC_TEST=value") {
-		t.Fatalf("safe values were removed: %v", filtered)
-	}
-	if strings.Contains(joined, "secret") {
-		t.Fatalf("credential-like values leaked: %v", filtered)
-	}
-}
-
-func TestSafeEnvironmentPreservesWindowsNamesCaseInsensitively(t *testing.T) {
-	filtered := safeEnvironmentForOS([]string{
-		"Path=C:\\Windows\\System32",
-		"SystemRoot=C:\\Windows",
-		"UserProfile=C:\\Users\\radio",
-		"ProgramFiles(x86)=C:\\Program Files (x86)",
-		"Database_Password=secret",
-	}, "windows")
-	joined := strings.Join(filtered, "\n")
-	for _, expected := range []string{"Path=", "SystemRoot=", "UserProfile=", "ProgramFiles(x86)="} {
-		if !strings.Contains(joined, expected) {
-			t.Fatalf("Windows environment variable %q was removed: %v", expected, filtered)
-		}
-	}
-	if strings.Contains(joined, "secret") {
-		t.Fatalf("credential-like value leaked: %v", filtered)
+func TestLocalExecutorInheritsEnvironment(t *testing.T) {
+	t.Setenv("ARIADNE_EXECUTOR_HELPER", "1")
+	t.Setenv("ARIADNE_INHERITED_VALUE", "visible")
+	result := (LocalExecutor{MaxOutputBytes: 1024}).Execute(
+		context.Background(),
+		helperRequest("environment", "ARIADNE_INHERITED_VALUE"),
+	)
+	if result.Error != "" || result.ExitCode != 0 || string(result.Stdout) != "visible" {
+		t.Fatalf("environment was not inherited: %#v", result)
 	}
 }
 
@@ -125,6 +102,9 @@ func TestExecutorHelperProcess(t *testing.T) {
 		os.Exit(0)
 	case "sleep":
 		time.Sleep(5 * time.Second)
+		os.Exit(0)
+	case "environment":
+		fmt.Fprint(os.Stdout, os.Getenv(os.Args[separator+1]))
 		os.Exit(0)
 	default:
 		os.Exit(92)

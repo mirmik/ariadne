@@ -283,9 +283,9 @@ func (server *embeddedSSHServer) startShell(ctx context.Context, channel ssh.Cha
 
 func (server *embeddedSSHServer) shellEnvironment() []string {
 	if server.environment != nil {
-		return safeEnvironment(server.environment)
+		return append([]string(nil), server.environment...)
 	}
-	return safeEnvironment(os.Environ())
+	return os.Environ()
 }
 
 func (process *shellProcess) signal(name string) error {
