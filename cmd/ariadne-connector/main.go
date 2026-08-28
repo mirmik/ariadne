@@ -111,11 +111,25 @@ func run() error {
 	connectorErrors := make(chan error, 1)
 	go func() { connectorErrors <- instance.Run(connectorContext) }()
 	select {
+	case <-runContext.Done():
+		logger.Info("shutting down")
+		cancelConnector()
+		tunnel.Close()
+		select {
+		case <-connectorErrors:
+		case <-time.After(5 * time.Second):
+			logger.Warn("connector session did not stop before shutdown timeout")
+		}
+		return nil
 	case err := <-connectorErrors:
 		return err
 	case <-tunnel.Done():
 		cancelConnector()
-		<-connectorErrors
+		select {
+		case <-connectorErrors:
+		case <-time.After(5 * time.Second):
+			return errors.New("connector session did not stop after SSH tunnel ended")
+		}
 		if runContext.Err() != nil {
 			return nil
 		}

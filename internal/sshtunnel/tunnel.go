@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -186,7 +187,11 @@ func (tunnel *Tunnel) Close() {
 			return
 		default:
 		}
-		_ = tunnel.command.Process.Signal(os.Interrupt)
+		if runtime.GOOS == "windows" {
+			_ = tunnel.command.Process.Kill()
+		} else if err := tunnel.command.Process.Signal(os.Interrupt); err != nil {
+			_ = tunnel.command.Process.Kill()
+		}
 		select {
 		case <-tunnel.done:
 		case <-time.After(2 * time.Second):
