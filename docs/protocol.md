@@ -9,7 +9,7 @@ Node plane по умолчанию использует отдельный по�
 - `GET /v1/connect` — постоянный WebSocket connector → relay;
 - `GET /healthz` — health endpoint.
 
-Management plane по умолчанию слушает `127.0.0.1:8088` и содержит:
+Management plane по умолчанию слушает `127.0.0.1:8088`, требует отдельный bearer token и содержит:
 
 - `GET /v1/nodes` — список online-узлов;
 - `POST /v1/nodes/{node_id}/claim` — назначение доверенного alias с management plane;
@@ -18,9 +18,9 @@ Management plane по умолчанию слушает `127.0.0.1:8088` и со
 - `GET /v1/nodes/{target}/streams/ssh` — опциональный WebSocket byte-stream до внешнего локального `sshd`;
 - `GET /healthz` — health endpoint.
 
-Node plane не требует предварительно доставленного bearer token: connector доказывает владение своей Ed25519 identity во время handshake. Он не предоставляет endpoints для управления. Management plane также не использует bearer token и поэтому обязан оставаться на loopback либо быть доступным через независимо аутентифицированный транспорт, например ограниченный SSH tunnel. Публичный node plane использует HTTPS/WSS.
+Node plane не требует предварительно доставленного bearer token: connector доказывает владение своей Ed25519 identity во время handshake. Он не предоставляет endpoints для управления. Management plane использует отдельный случайный 256-bit bearer token; relay создаёт token-файл `0600`, а `ari` читает его локально. Этот административный credential не входит в node bootstrap. Публичный node plane использует HTTPS/WSS.
 
-Типичный bootstrap не публикует node port через роутер: `ariadne-connector --relay-ssh breakglass@HOST` создаёт SSH local forward до relay `127.0.0.1:47471` и подключает WebSocket через него. Прямая публикация node plane на TCP `47471` с TLS остаётся альтернативой. Management client `ari` обычно работает во внутренней доверенной сети; для non-loopback management listener требуется явный `--allow-management-network`, а SSH tunnel mode `ari` является вспомогательным.
+Типичный bootstrap не публикует node port через роутер: `ariadne-connector --relay-ssh breakglass@HOST` создаёт SSH local forward до relay `127.0.0.1:47471` и подключает WebSocket через него. Прямая публикация node plane на TCP `47471` с TLS остаётся альтернативой. Management client `ari` обычно работает рядом с relay или через защищённый tunnel и должен иметь token-файл. Plaintext non-loopback listener требует явный `--allow-insecure-management-listen` и раскрывает bearer token наблюдателю сети.
 
 Переданный connector alias является недоверенной подсказкой. В списке узлов он имеет `alias_claimed: false` и не участвует в lookup. Management plane может связать alias с точным `node_id` через `/claim`; только такой alias разрешено использовать как target. Claims сохраняются после reconnect той же identity, но в v1 теряются при перезапуске relay.
 

@@ -14,7 +14,7 @@ Ariadne даёт агенту или человеку доступ к машин
 
 ```text
 ari shell / ari exec
-        │ management HTTP через loopback/SSH tunnel (:8088)
+        │ authenticated management HTTP через loopback/SSH tunnel (:8088)
         ▼
    ariadne-relay
         ▲
@@ -29,7 +29,7 @@ ari shell / ari exec
 
 ## Сборка
 
-Нужен Go 1.24 или новее.
+Нужен Go 1.26.6 или новее.
 
 Готовые connector-бинарники для Windows, Linux и Android/Termux публикуются в
 [GitHub Releases](https://github.com/mirmik/ariadne/releases). Для обычного
@@ -123,6 +123,14 @@ task build:android
 
 Identity connector создаётся один раз в пользовательском config-каталоге с правами `0600`. `node_id` является хешем публичного ключа и не меняется после reconnect. Стабильный SSH host key детерминированно и с отдельным domain label выводится из этой identity, но не переиспользует сам identity key.
 
+При первом запуске relay создаёт отдельный 256-bit management token в
+пользовательском config-каталоге (`$XDG_CONFIG_HOME/ariadne/management.token`,
+обычно `~/.config/ariadne/management.token`) с правами `0600`. `ari` по
+умолчанию читает тот же файл и передаёт token как bearer credential для всех
+management HTTP и WebSocket запросов. Путь с обеих сторон можно изменить через
+`--management-token-file`. Этот token никогда не передаётся connector и не
+участвует в bootstrap node identity.
+
 Alias, сообщённый новым connector, отображается в `ari nodes` с суффиксом `?` и не используется как target. Управляющая сторона должна один раз выполнить `ari claim NODE_ID ALIAS`; claim сохраняется в памяти relay, применяется после reconnect и делает alias доступным для `shell`/`exec`. Постоянное хранение claims пока не реализовано.
 
 ## Zero-config shell
@@ -186,7 +194,7 @@ ariadne-connector \
 
 OpenSSH запрашивает временный break-glass пароль, создаёт local forward до `127.0.0.1:47471` на relay и остаётся дочерним процессом connector. После истечения password TTL установленный tunnel продолжает работать. Если SSH-соединение оборвётся, connector завершится: для нового входа нужно снова открыть break-glass окно и перезапустить connector.
 
-`ari` в основном сценарии находится во внутренней доверенной сети и обращается прямо к `http://127.0.0.1:8088`. Для отдельного management-адреса внутри доверенной сети relay запускается с `--management-listen PRIVATE_IP:8088 --allow-management-network`; firewall не должен пропускать этот порт извне. Режим `ari --relay-ssh` сохранён только как вспомогательный вариант разового внешнего управления.
+`ari` в основном сценарии работает рядом с relay и обращается к `http://127.0.0.1:8088`, используя локальный management token. Для другой доверенной management-машины token-файл нужно безопасно доставить отдельно, а соединение провести через SSH tunnel или TLS reverse proxy. Явный `--allow-insecure-management-listen` разрешает plaintext bearer token на non-loopback адресе и предназначен только для изолированной доверенной сети. Режим `ari --relay-ssh` сохранён как вспомогательный вариант; на машине с `ari` всё равно должен быть management token-файл.
 
 Альтернативный режим — напрямую опубликовать node plane. Тогда настройте TLS и пробросьте только TCP `47471`:
 
@@ -207,7 +215,7 @@ ari --relay-ssh breakglass@relay-host shell phone
 
 Обе программы используют системный OpenSSH и выбирают свободный loopback-порт. Ручной `ssh -L` также поддерживается.
 
-Общий bearer token отсутствует. Публичный node plane принимает новые self-authenticated Ed25519 identities, но не содержит управляющих endpoints. Management plane разрешено привязать только к loopback. Флаги `--allow-insecure-node-listen` и `--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
+У connector нет bootstrap bearer token. Публичный node plane принимает новые self-authenticated Ed25519 identities, но не содержит управляющих endpoints. Отдельный management bearer token защищает `nodes`, `claim`, `exec` и stream endpoints даже на loopback. Management plane по умолчанию разрешено привязать только к loopback. Флаги `--allow-insecure-management-listen`, `--allow-insecure-node-listen` и `--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
 
 ## Текущие ограничения
 

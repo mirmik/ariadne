@@ -32,6 +32,7 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	relayConfig := relay.DefaultConfig()
 	relayConfig.PingInterval = 20 * time.Millisecond
 	relayConfig.PingTimeout = time.Second
+	relayConfig.ManagementToken = testManagementToken
 	relayServer := relay.New(relayConfig, logger)
 	defer relayServer.Close()
 	nodeServer := startHTTPTestServer(t, relayServer.NodeHandler())
@@ -79,8 +80,9 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	}()
 
 	apiClient, err := client.New(client.Config{
-		RelayURL:   managementServer.URL,
-		HTTPClient: managementServer.Client(),
+		RelayURL:        managementServer.URL,
+		ManagementToken: testManagementToken,
+		HTTPClient:      managementServer.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +240,20 @@ func assertPlaneIsolation(t *testing.T, nodeServer, managementServer *httptest.S
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("node plane exposed management API: status=%d", response.StatusCode)
 	}
-	response, err = managementServer.Client().Get(managementServer.URL + "/v1/connect")
+	response, err = managementServer.Client().Get(managementServer.URL + "/v1/nodes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("management plane accepted an unauthenticated request: status=%d", response.StatusCode)
+	}
+	request, err := http.NewRequest(http.MethodGet, managementServer.URL+"/v1/connect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testManagementToken)
+	response, err = managementServer.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +262,8 @@ func assertPlaneIsolation(t *testing.T, nodeServer, managementServer *httptest.S
 		t.Fatalf("management plane exposed connector endpoint: status=%d", response.StatusCode)
 	}
 }
+
+const testManagementToken = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"
 
 type echoExecutor struct{}
 

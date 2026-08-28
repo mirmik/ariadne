@@ -12,17 +12,20 @@ import (
 	"strings"
 
 	"github.com/coder/websocket"
+	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/wire"
 )
 
 type Config struct {
-	RelayURL   string
-	HTTPClient *http.Client
+	RelayURL        string
+	ManagementToken string
+	HTTPClient      *http.Client
 }
 
 type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
+	token      string
 }
 
 type HTTPError struct {
@@ -44,11 +47,14 @@ func New(config Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := managementauth.Validate(config.ManagementToken); err != nil {
+		return nil, fmt.Errorf("management token: %w", err)
+	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{baseURL: baseURL, httpClient: httpClient}, nil
+	return &Client{baseURL: baseURL, httpClient: httpClient, token: config.ManagementToken}, nil
 }
 
 func (client *Client) Nodes(ctx context.Context) ([]wire.NodeInfo, error) {
@@ -167,6 +173,7 @@ func (client *Client) dialStream(ctx context.Context, target, protocol string, e
 	if headers == nil {
 		headers = make(http.Header)
 	}
+	headers.Set("Authorization", "Bearer "+client.token)
 	connection, response, err := websocket.Dial(ctx, endpoint.String(), &websocket.DialOptions{
 		HTTPClient:      client.httpClient,
 		HTTPHeader:      headers,
@@ -188,6 +195,7 @@ func (client *Client) request(ctx context.Context, method, path string, body io.
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+client.token)
 	return request, nil
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/client"
+	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/sshtunnel"
 	"github.com/mirmik/ariadne/internal/transport"
 	"github.com/mirmik/ariadne/internal/wire"
@@ -25,10 +26,16 @@ func main() {
 }
 
 func run(arguments []string) int {
+	defaultManagementTokenPath, err := managementauth.DefaultPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ari:", err)
+		return 2
+	}
 	flags := flag.NewFlagSet("ari", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	relayURL := flags.String("relay", "http://127.0.0.1:8088", "management-plane relay base URL")
 	relaySSH := flags.String("relay-ssh", "", "reach management plane through an OpenSSH local tunnel")
+	managementTokenPath := flags.String("management-token-file", defaultManagementTokenPath, "management bearer token file")
 	allowInsecureRelay := flags.Bool("allow-insecure-relay", false, "allow plaintext relay outside loopback")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	flags.Usage = usage
@@ -45,7 +52,6 @@ func run(arguments []string) int {
 	}
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	var err error
 	if *relaySSH != "" {
 		tunnel, tunnelErr := sshtunnel.Start(runContext, sshtunnel.Config{
 			Destination:   *relaySSH,
@@ -62,7 +68,12 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "ari:", err)
 		return 2
 	}
-	apiClient, err := client.New(client.Config{RelayURL: *relayURL})
+	managementToken, err := managementauth.Load(*managementTokenPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ari:", err)
+		return 2
+	}
+	apiClient, err := client.New(client.Config{RelayURL: *relayURL, ManagementToken: managementToken})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ari:", err)
 		return 2

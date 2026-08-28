@@ -19,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/identity"
+	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/wire"
 	"golang.org/x/crypto/ssh"
 )
@@ -34,6 +35,7 @@ type Config struct {
 	PingTimeout          time.Duration
 	MaxPendingHandshakes int
 	MaxOnlineNodes       int
+	ManagementToken      string
 }
 
 func DefaultConfig() Config {
@@ -133,7 +135,19 @@ func (server *Server) ManagementHandler() http.Handler {
 	mux.HandleFunc("GET /v1/nodes", server.handleNodes)
 	mux.HandleFunc("POST /v1/nodes/", server.handleNodeAction)
 	mux.HandleFunc("GET /v1/nodes/", server.handleNodeAction)
-	return securityHeaders(mux)
+	return authenticateManagement(server.config.ManagementToken, securityHeaders(mux))
+}
+
+func authenticateManagement(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		provided := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		if token == "" || !managementauth.Equal(token, provided) {
+			response.Header().Set("WWW-Authenticate", "Bearer")
+			writeAPIError(response, http.StatusUnauthorized, "management authentication required")
+			return
+		}
+		next.ServeHTTP(response, request)
+	})
 }
 
 func (server *Server) Close() {

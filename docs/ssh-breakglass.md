@@ -154,6 +154,12 @@ ari --relay-ssh breakglass@server nodes
 ari --relay-ssh breakglass@server shell TARGET
 ```
 
+В отличие от connector, `ari` должен аутентифицироваться отдельным management
+token. Поэтому вспомогательный режим требует безопасно скопированного
+`management.token` и при необходимости флага `--management-token-file PATH`.
+Не оставляйте этот файл на недоверенной машине. Основной connector tunnel к
+`47471` management token не использует.
+
 Пароль автоматически блокируется по окончании TTL. Открытая SSH-сессия продолжает работать; новые входы перестают приниматься. Досрочное закрытие и проверка состояния:
 
 ```bash

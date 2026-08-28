@@ -8,6 +8,7 @@ vars:
   BIN_DIR: bin
   DIST_DIR: dist
   MANAGEMENT_RELAY: '{{default "http://127.0.0.1:8088" .ARIADNE_MANAGEMENT_RELAY}}'
+  MANAGEMENT_TOKEN_FILE: '{{default "" .ARIADNE_MANAGEMENT_TOKEN_FILE}}'
   NODE_RELAY: '{{default "http://127.0.0.1:47471" .ARIADNE_NODE_RELAY}}'
   NODE_RELAY_SSH: '{{default "" .ARIADNE_NODE_RELAY_SSH}}'
   MANAGEMENT_LISTEN: '{{default "127.0.0.1:8088" .ARIADNE_MANAGEMENT_LISTEN}}'
@@ -79,7 +80,7 @@ tasks:
   relay:
     desc: Build and run the relay
     deps: [build]
-    cmd: '"{{.BIN_DIR}}/ariadne-relay" --management-listen "{{.MANAGEMENT_LISTEN}}" --node-listen "{{.NODE_LISTEN}}" {{.CLI_ARGS}}'
+    cmd: '"{{.BIN_DIR}}/ariadne-relay" --management-listen "{{.MANAGEMENT_LISTEN}}" --node-listen "{{.NODE_LISTEN}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} {{.CLI_ARGS}}'
 
   connector:
     desc: Build and run a connector (NODE_ALIAS=phone by default)
@@ -89,7 +90,7 @@ tasks:
   nodes:
     desc: List nodes currently connected to the relay
     deps: [build]
-    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" nodes'
+    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} nodes'
 
   claim:
     desc: Claim NODE_ALIAS for an online NODE_ID
@@ -97,14 +98,14 @@ tasks:
     preconditions:
       - sh: test -n "{{.NODE_ID}}"
         msg: Pass NODE_ID from task nodes
-    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" claim "{{.NODE_ID}}" "{{.NODE_ALIAS}}"'
+    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} claim "{{.NODE_ID}}" "{{.NODE_ALIAS}}"'
 
   shell:
     desc: Open the zero-config shell on NODE=phone
     deps: [build]
-    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" shell "{{.NODE}}"'
+    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} shell "{{.NODE}}"'
 
   exec:
     desc: Run a command on NODE=phone; pass it after --
     deps: [build]
-    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" exec {{.EXEC_FLAGS}} "{{.NODE}}" -- {{.CLI_ARGS}}'
+    cmd: '"{{.BIN_DIR}}/ari" --relay "{{.MANAGEMENT_RELAY}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} exec {{.EXEC_FLAGS}} "{{.NODE}}" -- {{.CLI_ARGS}}'
