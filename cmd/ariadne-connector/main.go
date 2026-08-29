@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,7 +46,7 @@ func run() error {
 	knownRelaysPath := flags.String("known-relays-file", defaultKnownRelaysPath, "TOFU relay certificate store")
 	acceptNewRelayCertificate := flags.Bool("accept-new-relay-certificate", false, "explicitly accept one changed relay certificate in the TOFU store")
 	relayFallback := flags.String("relay-fallback", "auto", "WSS fallback for quic:// relay: auto, none, or an HTTPS/WSS URL")
-	alias := flags.String("alias", "", "reported human-readable label (claimed on the management plane)")
+	alias := flags.String("alias", "", "reported human-readable label (defaults to the local hostname)")
 	identityPath := flags.String("identity", defaultIdentityPath, "persistent Ed25519 identity file")
 	sshAddress := flags.String("ssh-address", "127.0.0.1:8022", "optional local sshd TCP address used by ari proxy")
 	shell := flags.String("shell", "", "shell executable for zero-config ari shell (defaults to SHELL, then sh)")
@@ -76,14 +77,18 @@ func run() error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	if *alias == "" {
-		return errors.New("--alias is required")
-	}
 	level := slog.LevelInfo
 	if *verbose {
 		level = slog.LevelDebug
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	connectorAlias, hostnameDefault, err := resolveConnectorAlias(*alias, os.Hostname)
+	if err != nil {
+		return err
+	}
+	if hostnameDefault {
+		logger.Info("using hostname as connector alias", "alias", connectorAlias)
+	}
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var tunnel *sshtunnel.Tunnel
@@ -132,7 +137,7 @@ func run() error {
 	}
 	instance, err := connector.New(connector.Config{
 		RelayURL:          relayTransport.url,
-		Alias:             *alias,
+		Alias:             connectorAlias,
 		Version:           version,
 		Identity:          nodeIdentity,
 		SSHAddress:        *sshAddress,
@@ -191,15 +196,56 @@ func run() error {
 	}
 }
 
+func resolveConnectorAlias(explicit string, hostname func() (string, error)) (string, bool, error) {
+	if explicit != "" {
+		return explicit, false, nil
+	}
+	name, err := hostname()
+	if err != nil {
+		return "", false, fmt.Errorf("determine hostname for default alias: %w; pass --alias explicitly", err)
+	}
+	alias := normalizeHostnameAlias(name)
+	if alias == "" {
+		return "", false, fmt.Errorf("hostname %q cannot form a connector alias; pass --alias explicitly", name)
+	}
+	return alias, true, nil
+}
+
+func normalizeHostnameAlias(hostname string) string {
+	const maximumAliasLength = 63
+	trimmed := strings.TrimSpace(hostname)
+	alias := make([]byte, 0, min(len(trimmed), maximumAliasLength))
+	for index := 0; index < len(trimmed) && len(alias) < maximumAliasLength; index++ {
+		character := trimmed[index]
+		alphanumeric := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
+		if alphanumeric {
+			alias = append(alias, character)
+			continue
+		}
+		if len(alias) == 0 {
+			continue
+		}
+		if character == '.' || character == '_' || character == '-' {
+			alias = append(alias, character)
+			continue
+		}
+		if alias[len(alias)-1] != '-' {
+			alias = append(alias, '-')
+		}
+	}
+	return strings.TrimRight(string(alias), "._-")
+}
+
 func printConnectorUsage(flags *flag.FlagSet) {
 	output := flags.Output()
 	fmt.Fprintln(output, `Usage:
-  ariadne-connector --relay HOST --alias ALIAS [options]
-  ariadne-connector --relay-ssh USER@HOST[:PORT] --alias ALIAS [options]
+  ariadne-connector --relay HOST [options]
+  ariadne-connector --relay-ssh USER@HOST[:PORT] [options]
 
 Ariadne connector keeps an outgoing node connection to the relay and exposes
 shell, structured exec, file transfer, and connector-owned background jobs
 only through requests received from the management plane.
+When --alias is omitted, the connector reports a normalized local hostname.
 
 Relay addresses:
   HOST                 QUIC on the default port: quic://HOST:47471
@@ -216,6 +262,7 @@ Relay trust (direct QUIC/WSS):
   --relay-cert-pin bypasses TOFU and requires an exact pre-provisioned pin.
 
 Examples:
+  ariadne-connector --relay relay.example
   ariadne-connector --relay relay.example --alias workstation
   ariadne-connector --relay relay.example:48123 --alias workstation
   ariadne-connector --relay https://relay.example:47471 --alias workstation

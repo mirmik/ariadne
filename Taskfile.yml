@@ -19,7 +19,7 @@ vars:
   NODE_QUIC_LISTEN: '{{default "" .ARIADNE_NODE_QUIC_LISTEN}}'
   NODE_TLS_CERT: '{{default "" .ARIADNE_NODE_TLS_CERT}}'
   NODE_TLS_KEY: '{{default "" .ARIADNE_NODE_TLS_KEY}}'
-  NODE_ALIAS: '{{default "phone" .ARIADNE_ALIAS}}'
+  NODE_ALIAS: '{{default "" .ARIADNE_ALIAS}}'
   NODE: '{{default "phone" .ARIADNE_ALIAS}}'
   ARCH: arm64
 
@@ -95,9 +95,9 @@ tasks:
     cmd: '"{{.BIN_DIR}}/ariadne-mcp" --relay "{{.MANAGEMENT_RELAY}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} {{.CLI_ARGS}}'
 
   connector:
-    desc: Build and run a connector (NODE_ALIAS=phone by default)
+    desc: Build and run a connector (hostname alias by default; NODE_ALIAS overrides)
     deps: [build]
-    cmd: '"{{.BIN_DIR}}/ariadne-connector" --relay "{{.NODE_RELAY}}" {{if .NODE_RELAY_SSH}}--relay-ssh "{{.NODE_RELAY_SSH}}"{{end}} {{if .NODE_RELAY_CERT_PIN}}--relay-cert-pin "{{.NODE_RELAY_CERT_PIN}}"{{end}} --relay-fallback "{{.NODE_RELAY_FALLBACK}}" --alias "{{.NODE_ALIAS}}" {{.CLI_ARGS}}'
+    cmd: '"{{.BIN_DIR}}/ariadne-connector" --relay "{{.NODE_RELAY}}" {{if .NODE_RELAY_SSH}}--relay-ssh "{{.NODE_RELAY_SSH}}"{{end}} {{if .NODE_RELAY_CERT_PIN}}--relay-cert-pin "{{.NODE_RELAY_CERT_PIN}}"{{end}} --relay-fallback "{{.NODE_RELAY_FALLBACK}}" {{if .NODE_ALIAS}}--alias "{{.NODE_ALIAS}}"{{end}} {{.CLI_ARGS}}'
 
   nodes:
     desc: List nodes currently connected to the relay

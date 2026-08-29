@@ -106,8 +106,13 @@ task build:android
 В другом терминале:
 
 ```bash
-./bin/ariadne-connector --alias phone
+./bin/ariadne-connector
 ```
+
+Без `--alias` connector использует нормализованный hostname машины. Явный
+`--alias phone` по-прежнему имеет приоритет и удобен для заранее выбранного
+имени; management plane всё равно должен один раз подтвердить alias через
+`ari claim`.
 
 `--ssh-address` влияет только на опциональный `ari proxy`; для `ari shell` этот адрес не используется, поэтому флаг можно не указывать.
 
