@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -94,6 +95,7 @@ func (stream *relayStream) finishedError() error {
 
 func (server *Server) handleStreamProxy(response http.ResponseWriter, request *http.Request, session *nodeSession, protocol string) {
 	sshClientPublicKey := ""
+	var fileOpen *wire.FileTransferOpen
 	if protocol == "shell" {
 		sshClientPublicKey = request.Header.Get(wire.HeaderSSHClientKey)
 		if _, err := parseWireSSHKey(sshClientPublicKey); err != nil {
@@ -105,6 +107,18 @@ func (server *Server) handleStreamProxy(response http.ResponseWriter, request *h
 		return
 	}
 	sessionInfo := session.nodeInfo()
+	if protocol == "file-upload" || protocol == "file-download" {
+		if !wire.HasCapability(sessionInfo.Capabilities, wire.CapabilityFileTransfer) {
+			writeAPIError(response, http.StatusConflict, "connector does not support file transfer; update ariadne-connector")
+			return
+		}
+		var err error
+		fileOpen, err = parseFileStreamOpen(request, protocol)
+		if err != nil {
+			writeAPIError(response, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	response.Header().Set(wire.HeaderNodeID, sessionInfo.ID)
 	response.Header().Set(wire.HeaderSSHHostKey, sessionInfo.SSHHostKey)
 	clientConnection, err := websocket.Accept(response, request, nil)
@@ -137,6 +151,7 @@ func (server *Server) handleStreamProxy(response http.ResponseWriter, request *h
 		StreamID:           stream.id,
 		Protocol:           protocol,
 		SSHClientPublicKey: sshClientPublicKey,
+		File:               fileOpen,
 	}); err != nil {
 		_ = clientConnection.Close(websocket.StatusGoingAway, "node disconnected")
 		return
@@ -171,6 +186,44 @@ func (server *Server) handleStreamProxy(response http.ResponseWriter, request *h
 	if err != nil && !isNormalStreamEnd(err) {
 		server.logger.Debug("stream closed with error", "node_id", sessionInfo.ID, "stream_id", stream.id, "error", err)
 	}
+}
+
+func parseFileStreamOpen(request *http.Request, protocol string) (*wire.FileTransferOpen, error) {
+	query := request.URL.Query()
+	for key, values := range query {
+		if key != "path" && key != "overwrite" && key != "mode" {
+			return nil, fmt.Errorf("unknown file stream parameter %q", key)
+		}
+		if len(values) != 1 {
+			return nil, fmt.Errorf("file stream parameter %q must appear once", key)
+		}
+	}
+	path := query.Get("path")
+	if path == "" || len(path) > 16<<10 {
+		return nil, errors.New("file path must contain 1 to 16384 bytes")
+	}
+	open := &wire.FileTransferOpen{Path: path}
+	if protocol == "file-download" {
+		if query.Has("overwrite") || query.Has("mode") {
+			return nil, errors.New("download stream accepts only path")
+		}
+		return open, nil
+	}
+	if query.Has("overwrite") {
+		overwrite, err := strconv.ParseBool(query.Get("overwrite"))
+		if err != nil {
+			return nil, errors.New("overwrite must be true or false")
+		}
+		open.Overwrite = overwrite
+	}
+	if query.Has("mode") {
+		mode, err := strconv.ParseUint(query.Get("mode"), 8, 32)
+		if err != nil || mode&^0o777 != 0 {
+			return nil, errors.New("mode must be an octal permission value")
+		}
+		open.Mode = uint32(mode)
+	}
+	return open, nil
 }
 
 func pingClientStream(ctx context.Context, connection *websocket.Conn, interval, timeout time.Duration) error {

@@ -95,6 +95,9 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := waitForNode(t, apiClient, "phone")
+	if !wire.HasCapability(node.Capabilities, wire.CapabilityFileTransfer) {
+		t.Fatalf("connector did not advertise file transfer: %#v", node.Capabilities)
+	}
 	claimed, err := apiClient.Claim(context.Background(), node.ID, "phone")
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +130,35 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	}
 	if commandResult.ExitCode != 0 || commandResult.Shell != "sh" || string(commandResult.Stdout) != "sh\x00-lc\x00printf 'hello from shell' | tr a-z A-Z" {
 		t.Fatalf("unexpected shell command result: %#v", commandResult)
+	}
+
+	filePayload := append([]byte("ariadne-file\x00"), bytes.Repeat([]byte{0xff, 0x42}, 40<<10)...)
+	uploadSource := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(uploadSource, filePayload, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	remotePath := filepath.Join(t.TempDir(), "remote.bin")
+	transferContext, cancelTransfer := context.WithTimeout(context.Background(), 5*time.Second)
+	uploadResult, err := apiClient.UploadFile(transferContext, "phone", uploadSource, remotePath, false)
+	cancelTransfer()
+	if err != nil || uploadResult.Size != int64(len(filePayload)) || uploadResult.SHA256 == "" {
+		t.Fatalf("upload failed: result=%#v err=%v", uploadResult, err)
+	}
+	remotePayload, err := os.ReadFile(remotePath)
+	if err != nil || !bytes.Equal(remotePayload, filePayload) {
+		t.Fatalf("remote upload differs: size=%d err=%v", len(remotePayload), err)
+	}
+
+	downloadPath := filepath.Join(t.TempDir(), "download.bin")
+	transferContext, cancelTransfer = context.WithTimeout(context.Background(), 5*time.Second)
+	downloadResult, err := apiClient.DownloadFile(transferContext, "phone", remotePath, downloadPath, false)
+	cancelTransfer()
+	if err != nil || downloadResult.Size != uploadResult.Size || downloadResult.SHA256 != uploadResult.SHA256 {
+		t.Fatalf("download failed: result=%#v err=%v", downloadResult, err)
+	}
+	downloadPayload, err := os.ReadFile(downloadPath)
+	if err != nil || !bytes.Equal(downloadPayload, filePayload) {
+		t.Fatalf("download differs: size=%d err=%v", len(downloadPayload), err)
 	}
 
 	streamContext, cancelStream := context.WithTimeout(context.Background(), 3*time.Second)
@@ -397,6 +429,18 @@ func TestQUICConnectorReconnectsAfterTransportRestart(t *testing.T) {
 	if _, err := apiClient.Claim(context.Background(), firstNode.ID, "reconnecting-node"); err != nil {
 		t.Fatal(err)
 	}
+	if !wire.HasCapability(firstNode.Capabilities, wire.CapabilityBackgroundJobs) {
+		t.Fatalf("connector did not advertise background jobs: %#v", firstNode.Capabilities)
+	}
+	job, err := apiClient.StartJob(context.Background(), "reconnecting-node", wire.ExecRequest{
+		Argv: []string{"/bin/sh", "-c", "printf 'before\\n'; sleep 0.4; printf 'after\\n'"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID == "" || job.State != "running" {
+		t.Fatalf("unexpected started job: %#v", job)
+	}
 
 	cancelFirst()
 	if err := firstQUICServer.Close(); err != nil {
@@ -432,6 +476,17 @@ func TestQUICConnectorReconnectsAfterTransportRestart(t *testing.T) {
 	if secondNode.ID != firstNode.ID || !secondNode.AliasClaimed {
 		t.Fatalf("reconnected node lost identity or claim: before=%#v after=%#v", firstNode, secondNode)
 	}
+	job = waitForJob(t, apiClient, "reconnecting-node", job.ID)
+	if job.State != "succeeded" || job.ExitCode != 0 {
+		t.Fatalf("job did not survive transport restart: %#v", job)
+	}
+	job, output, err := apiClient.ReadJob(context.Background(), "reconnecting-node", job.ID, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output.Stdout) != "before\nafter\n" || !output.StdoutEOF || !output.StderrEOF {
+		t.Fatalf("unexpected retained job output: job=%#v output=%#v", job, output)
+	}
 	result, err := apiClient.Exec(context.Background(), "reconnecting-node", wire.ExecRequest{
 		Argv:          []string{"echo", "after-reconnect"},
 		TimeoutMillis: 1000,
@@ -442,6 +497,21 @@ func TestQUICConnectorReconnectsAfterTransportRestart(t *testing.T) {
 	if string(result.Stdout) != "echo\x00after-reconnect" {
 		t.Fatalf("unexpected post-reconnect result: %#v", result)
 	}
+}
+
+func waitForJob(t *testing.T, apiClient *client.Client, target, jobID string) wire.JobInfo {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := apiClient.JobStatus(context.Background(), target, jobID)
+		if err == nil && job.State != "running" {
+			return job
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	job, err := apiClient.JobStatus(context.Background(), target, jobID)
+	t.Fatalf("job did not finish: job=%#v err=%v", job, err)
+	return wire.JobInfo{}
 }
 
 func startHTTPTestServer(t *testing.T, handler http.Handler) *httptest.Server {

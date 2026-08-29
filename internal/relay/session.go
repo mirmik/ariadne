@@ -30,6 +30,7 @@ type nodeSession struct {
 
 	pendingMu sync.Mutex
 	pending   map[string]chan wire.ExecResult
+	pendingJobs map[string]chan wire.JobResponse
 
 	streamsMu sync.RWMutex
 	streams   map[string]*relayStream
@@ -56,6 +57,7 @@ func newNodeSession(server *Server, connection messageconn.Conn, info wire.NodeI
 		info:    info,
 		done:    make(chan struct{}),
 		pending: make(map[string]chan wire.ExecResult),
+		pendingJobs: make(map[string]chan wire.JobResponse),
 		streams: make(map[string]*relayStream),
 		known:   make(map[string]struct{}),
 	}
@@ -119,6 +121,29 @@ func (session *nodeSession) handleControl(envelope wire.Envelope) error {
 		}
 		select {
 		case resultChannel <- result:
+		default:
+		}
+		return nil
+
+	case wire.MessageJobResponse:
+		if envelope.ID == "" {
+			return errors.New("job response has no request ID")
+		}
+		response, err := wire.DecodePayload[wire.JobResponse](envelope)
+		if err != nil {
+			return err
+		}
+		session.pendingMu.Lock()
+		responseChannel := session.pendingJobs[envelope.ID]
+		if responseChannel != nil {
+			delete(session.pendingJobs, envelope.ID)
+		}
+		session.pendingMu.Unlock()
+		if responseChannel == nil {
+			return fmt.Errorf("connector sent an unsolicited job response for request %s", envelope.ID)
+		}
+		select {
+		case responseChannel <- response:
 		default:
 		}
 		return nil
@@ -194,6 +219,42 @@ func (session *nodeSession) exec(ctx context.Context, request wire.ExecRequest) 
 		defer cancel()
 		_ = session.sendControlWithContext(cancelContext, wire.MessageExecCancel, requestID, nil)
 		return wire.ExecResult{}, ctx.Err()
+	}
+}
+
+func (session *nodeSession) job(ctx context.Context, request wire.JobRequest) (wire.JobResponse, error) {
+	requestID, err := randomID()
+	if err != nil {
+		return wire.JobResponse{}, err
+	}
+	responseChannel := make(chan wire.JobResponse, 1)
+	session.pendingMu.Lock()
+	select {
+	case <-session.done:
+		session.pendingMu.Unlock()
+		return wire.JobResponse{}, session.closedError()
+	default:
+	}
+	session.pendingJobs[requestID] = responseChannel
+	session.pendingMu.Unlock()
+	defer func() {
+		session.pendingMu.Lock()
+		delete(session.pendingJobs, requestID)
+		session.pendingMu.Unlock()
+	}()
+	if err := session.sendControl(wire.MessageJobRequest, requestID, request); err != nil {
+		return wire.JobResponse{}, fmt.Errorf("send job request: %w", err)
+	}
+	select {
+	case response := <-responseChannel:
+		if response.Error != "" {
+			return response, errors.New(response.Error)
+		}
+		return response, nil
+	case <-session.done:
+		return wire.JobResponse{}, session.closedError()
+	case <-ctx.Done():
+		return wire.JobResponse{}, ctx.Err()
 	}
 }
 

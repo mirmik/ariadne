@@ -22,6 +22,9 @@ const (
 	HeaderSSHClientKey = "X-Ariadne-SSH-Client-Key"
 	HeaderNodeID       = "X-Ariadne-Node-ID"
 	HeaderSSHHostKey   = "X-Ariadne-SSH-Host-Key"
+
+	CapabilityFileTransfer   = "file-transfer.v1"
+	CapabilityBackgroundJobs = "background-jobs.v1"
 )
 
 type MessageType string
@@ -34,6 +37,8 @@ const (
 	MessageExecRequest  MessageType = "exec.request"
 	MessageExecResult   MessageType = "exec.result"
 	MessageExecCancel   MessageType = "exec.cancel"
+	MessageJobRequest   MessageType = "job.request"
+	MessageJobResponse  MessageType = "job.response"
 	MessageStreamOpen   MessageType = "stream.open"
 	MessageStreamOpened MessageType = "stream.opened"
 	MessageStreamError  MessageType = "stream.error"
@@ -49,13 +54,14 @@ type Envelope struct {
 }
 
 type Hello struct {
-	NodeID           string `json:"node_id"`
-	Alias            string `json:"alias"`
-	PublicKey        string `json:"public_key"`
-	SSHHostKey       string `json:"ssh_host_key"`
-	Platform         string `json:"platform"`
-	Architecture     string `json:"architecture"`
-	ConnectorVersion string `json:"connector_version"`
+	NodeID           string   `json:"node_id"`
+	Alias            string   `json:"alias"`
+	PublicKey        string   `json:"public_key"`
+	SSHHostKey       string   `json:"ssh_host_key"`
+	Platform         string   `json:"platform"`
+	Architecture     string   `json:"architecture"`
+	ConnectorVersion string   `json:"connector_version"`
+	Capabilities     []string `json:"capabilities,omitempty"`
 }
 
 type Challenge struct {
@@ -78,6 +84,7 @@ type NodeInfo struct {
 	Platform         string    `json:"platform"`
 	Architecture     string    `json:"architecture"`
 	ConnectorVersion string    `json:"connector_version"`
+	Capabilities     []string  `json:"capabilities,omitempty"`
 	ConnectedAt      time.Time `json:"connected_at"`
 	Online           bool      `json:"online"`
 }
@@ -110,10 +117,80 @@ type ExecResult struct {
 	DurationMillis  int64  `json:"duration_ms"`
 }
 
+type JobAction string
+
+const (
+	JobActionStart  JobAction = "start"
+	JobActionList   JobAction = "list"
+	JobActionStatus JobAction = "status"
+	JobActionRead   JobAction = "read"
+	JobActionCancel JobAction = "cancel"
+	JobActionRemove JobAction = "remove"
+)
+
+type JobRequest struct {
+	Action       JobAction    `json:"action"`
+	JobID        string       `json:"job_id,omitempty"`
+	Exec         *ExecRequest `json:"exec,omitempty"`
+	Command      string       `json:"command,omitempty"`
+	Shell        string       `json:"shell,omitempty"`
+	StdoutOffset int64        `json:"stdout_offset,omitempty"`
+	StderrOffset int64        `json:"stderr_offset,omitempty"`
+	Limit        int          `json:"limit,omitempty"`
+}
+
+type JobResponse struct {
+	Job    *JobInfo   `json:"job,omitempty"`
+	Jobs   []JobInfo  `json:"jobs,omitempty"`
+	Output *JobOutput `json:"output,omitempty"`
+	Error  string     `json:"error,omitempty"`
+}
+
+type JobInfo struct {
+	ID              string    `json:"id"`
+	State           string    `json:"state"`
+	Argv            []string  `json:"argv,omitempty"`
+	Command         string    `json:"command,omitempty"`
+	Shell           string    `json:"shell,omitempty"`
+	Cwd             string    `json:"cwd,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	StartedAt       time.Time `json:"started_at"`
+	FinishedAt      time.Time `json:"finished_at,omitempty"`
+	ExitCode        int       `json:"exit_code"`
+	Error           string    `json:"error,omitempty"`
+	StdoutSize      int64     `json:"stdout_size"`
+	StderrSize      int64     `json:"stderr_size"`
+	StdoutTruncated bool      `json:"stdout_truncated,omitempty"`
+	StderrTruncated bool      `json:"stderr_truncated,omitempty"`
+}
+
+type JobOutput struct {
+	Stdout           []byte `json:"stdout,omitempty"`
+	Stderr           []byte `json:"stderr,omitempty"`
+	NextStdoutOffset int64  `json:"next_stdout_offset"`
+	NextStderrOffset int64  `json:"next_stderr_offset"`
+	StdoutEOF        bool   `json:"stdout_eof"`
+	StderrEOF        bool   `json:"stderr_eof"`
+}
+
 type StreamOpen struct {
-	StreamID           string `json:"stream_id"`
-	Protocol           string `json:"protocol"`
-	SSHClientPublicKey string `json:"ssh_client_public_key,omitempty"`
+	StreamID           string            `json:"stream_id"`
+	Protocol           string            `json:"protocol"`
+	SSHClientPublicKey string            `json:"ssh_client_public_key,omitempty"`
+	File               *FileTransferOpen `json:"file,omitempty"`
+}
+
+type FileTransferOpen struct {
+	Path      string `json:"path"`
+	Overwrite bool   `json:"overwrite,omitempty"`
+	Mode      uint32 `json:"mode,omitempty"`
+}
+
+type FileTransferResult struct {
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256,omitempty"`
+	Mode   uint32 `json:"mode,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 type StreamState struct {
@@ -134,6 +211,15 @@ var aliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
 func ValidAlias(alias string) bool {
 	return aliasPattern.MatchString(alias)
+}
+
+func HasCapability(capabilities []string, capability string) bool {
+	for _, candidate := range capabilities {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func NewEnvelope(messageType MessageType, id string, payload any) (Envelope, error) {

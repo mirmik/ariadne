@@ -5,7 +5,7 @@ Ariadne даёт агенту или человеку доступ к машин
 Репозиторий пока содержит экспериментальный, но уже сквозной MVP:
 
 - `ariadne-relay` — registry online-узлов и маршрутизация потоков;
-- `ariadne-connector` — исходящее соединение, постоянная Ed25519 identity, встроенный SSH endpoint, PTY, опциональный forwarding до локального `sshd` и структурированный exec;
+- `ariadne-connector` — исходящее соединение, постоянная Ed25519 identity, встроенный SSH endpoint, PTY, опциональный forwarding до локального `sshd`, структурированный exec и атомарная передача файлов;
 - `ari` — команды `nodes`, `exec`, zero-config `shell` и OpenSSH-совместимый `proxy`;
 - challenge-response регистрации без bootstrap-секрета, reconnect, лимиты времени, параллелизма и вывода;
 - unit-тесты и интеграционный тест полного relay → connector пути.
@@ -119,6 +119,11 @@ task build:android
 ./bin/ari exec --command 'uname -a | sed -n "1p"' phone
 ./bin/ari exec phone -- uname -a
 ./bin/ari exec --timeout 5s --cwd /tmp phone -- pwd
+./bin/ari upload phone ./artifact.bin /tmp/artifact.bin
+./bin/ari download phone /tmp/result.bin ./result.bin
+./bin/ari job start --command 'task build >build.log 2>&1' buildbox
+./bin/ari job list buildbox
+./bin/ari job read buildbox JOB_ID
 ./bin/ari shell phone
 ```
 
@@ -129,8 +134,14 @@ task build:android
 - `ariadne_nodes` — живые ноды, platform и статус доверенного alias;
 - `ariadne_claim` — привязка alias к точному `node_id`;
 - `ariadne_exec` — командная строка через нативный shell узла, опциональный точный `argv`, remote `cwd`, timeout и структурированные stdout/stderr/exit code.
+- `ariadne_file_upload` / `ariadne_file_download` — path-to-path streaming между MCP host и узлом без передачи file bytes через контекст модели.
+- `ariadne_job_start/list/status/read/cancel/remove` — connector-owned фоновые задачи с ограниченным spool и курсорным чтением stdout/stderr.
 
 MCP запускается рядом с relay, читает тот же локальный management token и не передаёт его connector. Интерактивный shell не включён в MCP: stdio занят протоколом, а агентские операции используют завершённые exec-запросы. Для обычной работы агент передаёт `command`; `argv` нужен только для точного запуска без интерпретации shell.
+
+Файловые tools публикуют destination только после полной передачи и взаимной проверки размера и SHA-256. По умолчанию существующий путь не заменяется; `overwrite` включает атомарную замену. Connector объявляет эту возможность как capability `file-transfer.v1`, поэтому relay не отправляет новый stream старым connector.
+
+Фоновая задача продолжает выполняться при обрыве и переподключении node transport: процесс и stdout/stderr принадлежат долгоживущему процессу connector, а не одной relay-сессии. В первой версии реестр не сохраняется на диск: остановка или перезапуск connector отменяет выполняющиеся задачи и удаляет доступ к накопленному выводу. По умолчанию одновременно работают до 4 задач, на каждый поток вывода сохраняется до 16 MiB, завершённые задачи удерживаются до 24 часов (не более 64 записей).
 
 Для Codex соберите MCP, установите user-wide skill и зарегистрируйте сервер одной командой:
 

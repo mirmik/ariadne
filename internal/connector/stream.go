@@ -20,6 +20,7 @@ type localStream struct {
 	id            string
 	protocol      string
 	authorizedKey ssh.PublicKey
+	file          *wire.FileTransferOpen
 	session       *session
 	context       context.Context
 	cancel        context.CancelFunc
@@ -40,6 +41,7 @@ func newLocalStream(request wire.StreamOpen, session *session, authorizedKey ssh
 		id:            request.StreamID,
 		protocol:      request.Protocol,
 		authorizedKey: authorizedKey,
+		file:          request.File,
 		session:       session,
 		context:       streamContext,
 		cancel:        cancel,
@@ -63,6 +65,16 @@ func (session *session) openStream(request wire.StreamOpen) error {
 		authorizedKey, err = parseSSHStreamKey(request.SSHClientPublicKey)
 		if err != nil {
 			return session.sendStreamError(request.StreamID, err.Error())
+		}
+	case "file-upload", "file-download":
+		if request.SSHClientPublicKey != "" {
+			return session.sendStreamError(request.StreamID, "file streams do not accept a session key")
+		}
+		if request.File == nil || request.File.Path == "" || len(request.File.Path) > 16<<10 {
+			return session.sendStreamError(request.StreamID, "file path must contain 1 to 16384 bytes")
+		}
+		if request.File.Mode&^0o777 != 0 {
+			return session.sendStreamError(request.StreamID, "file mode must contain permission bits only")
 		}
 	default:
 		return session.sendStreamError(request.StreamID, "unsupported stream protocol")
@@ -93,6 +105,10 @@ func (stream *localStream) run() {
 		err = stream.runExternalSSH()
 	case "shell":
 		err = stream.runEmbeddedShell()
+	case "file-upload":
+		err = stream.runFileUpload()
+	case "file-download":
+		err = stream.runFileDownload()
 	default:
 		err = errors.New("unsupported stream protocol")
 	}

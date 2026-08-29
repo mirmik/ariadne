@@ -144,7 +144,9 @@ MCP лучше держать централизованно рядом с relay
 machines.list
 machines.status
 machines.exec(target, command, shell, cwd, timeout)
-machines.process_start/read/write/kill
+machines.file_upload(target, local_path, remote_path, overwrite)
+machines.file_download(target, remote_path, local_path, overwrite)
+machines.job_start/list/status/read/cancel/remove
 machines.files_list/get/put
 machines.shell
 ```
@@ -155,7 +157,7 @@ MCP является northbound API для модели. Relay/connector обр�
 
 ## Онлайн- и офлайн-семантика
 
-Интерактивный shell возможен только при online-узле. Для автоматических задач позднее можно добавить отдельную очередь: подписанное задание с TTL, получение после reconnect и ограниченный artifact с результатом. Не следует изображать offline job как зависшее SSH-соединение.
+Интерактивный shell и запуск новой задачи возможны только при online-узле. Connector-owned job переживает разрыв transport и продолжает выполняться до завершения, timeout, отмены или остановки connector; после reconnect доступны статус и ограниченный spool вывода. Это не offline-очередь и пока не durable storage: перезапуск connector теряет реестр. Для запуска заданий на уже offline-узле позднее нужна отдельная очередь с TTL и ограниченным artifact; не следует изображать её как зависшее SSH-соединение.
 
 ## Безопасность
 

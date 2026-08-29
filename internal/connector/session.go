@@ -17,6 +17,7 @@ type session struct {
 	conn      messageconn.Conn
 	context   context.Context
 	cancel    context.CancelFunc
+	lifecycle context.Context
 
 	writeMu sync.Mutex
 
@@ -35,6 +36,7 @@ func newSession(parent context.Context, connector *Connector, connection message
 		conn:      connection,
 		context:   sessionContext,
 		cancel:    cancel,
+		lifecycle: parent,
 		execSlots: make(chan struct{}, connector.config.MaxConcurrentExec),
 		running:   make(map[string]context.CancelFunc),
 		streams:   make(map[string]*localStream),
@@ -91,6 +93,17 @@ func (session *session) handleControl(envelope wire.Envelope) error {
 			cancel()
 		}
 		return nil
+
+	case wire.MessageJobRequest:
+		if envelope.ID == "" {
+			return errors.New("job request has no request ID")
+		}
+		request, err := wire.DecodePayload[wire.JobRequest](envelope)
+		if err != nil {
+			return err
+		}
+		response := session.connector.jobs.Handle(session.lifecycle, request)
+		return session.sendControl(wire.MessageJobResponse, envelope.ID, response)
 
 	case wire.MessageStreamOpen:
 		openRequest, err := wire.DecodePayload[wire.StreamOpen](envelope)

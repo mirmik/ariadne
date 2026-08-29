@@ -32,6 +32,7 @@ type Config struct {
 	StreamOpenTimeout    time.Duration
 	DefaultExecTimeout   time.Duration
 	MaxExecTimeout       time.Duration
+	MaxJobTimeout        time.Duration
 	ExecResultGrace      time.Duration
 	PingInterval         time.Duration
 	PingTimeout          time.Duration
@@ -46,6 +47,7 @@ func DefaultConfig() Config {
 		StreamOpenTimeout:    10 * time.Second,
 		DefaultExecTimeout:   30 * time.Second,
 		MaxExecTimeout:       10 * time.Minute,
+		MaxJobTimeout:        24 * time.Hour,
 		ExecResultGrace:      5 * time.Second,
 		PingInterval:         30 * time.Second,
 		PingTimeout:          10 * time.Second,
@@ -84,6 +86,9 @@ func New(config Config, logger *slog.Logger) *Server {
 	}
 	if config.MaxExecTimeout <= 0 {
 		config.MaxExecTimeout = defaults.MaxExecTimeout
+	}
+	if config.MaxJobTimeout <= 0 {
+		config.MaxJobTimeout = defaults.MaxJobTimeout
 	}
 	if config.DefaultExecTimeout > config.MaxExecTimeout {
 		config.DefaultExecTimeout = config.MaxExecTimeout
@@ -137,6 +142,7 @@ func (server *Server) ManagementHandler() http.Handler {
 	mux.HandleFunc("GET /v1/nodes", server.handleNodes)
 	mux.HandleFunc("POST /v1/nodes/", server.handleNodeAction)
 	mux.HandleFunc("GET /v1/nodes/", server.handleNodeAction)
+	mux.HandleFunc("DELETE /v1/nodes/", server.handleNodeAction)
 	return authenticateManagement(server.config.ManagementToken, securityHeaders(mux))
 }
 
@@ -205,6 +211,14 @@ func (server *Server) handleNodeAction(response http.ResponseWriter, request *ht
 		server.handleStreamProxy(response, request, session, "ssh")
 	case request.Method == http.MethodGet && action == "streams/shell":
 		server.handleStreamProxy(response, request, session, "shell")
+	case request.Method == http.MethodGet && action == "streams/file-upload":
+		server.handleStreamProxy(response, request, session, "file-upload")
+	case request.Method == http.MethodGet && action == "streams/file-download":
+		server.handleStreamProxy(response, request, session, "file-download")
+	case action == "jobs" && (request.Method == http.MethodGet || request.Method == http.MethodPost):
+		server.handleJobs(response, request, session)
+	case strings.HasPrefix(action, "jobs/"):
+		server.handleJob(response, request, session, strings.TrimPrefix(action, "jobs/"))
 	default:
 		writeAPIError(response, http.StatusNotFound, "unknown node endpoint")
 	}
@@ -356,6 +370,7 @@ func (server *Server) serveConnector(connection messageconn.Conn, handshakeSlotH
 		Platform:         hello.Platform,
 		Architecture:     hello.Architecture,
 		ConnectorVersion: hello.ConnectorVersion,
+		Capabilities:     append([]string(nil), hello.Capabilities...),
 		ConnectedAt:      time.Now().UTC(),
 		Online:           true,
 	})
@@ -459,6 +474,19 @@ func readAndValidateHello(ctx context.Context, connection messageconn.Conn) (wir
 	}
 	if len(hello.ConnectorVersion) > 64 {
 		return wire.Hello{}, nil, errors.New("connector version is too long")
+	}
+	if len(hello.Capabilities) > 32 {
+		return wire.Hello{}, nil, errors.New("connector advertises too many capabilities")
+	}
+	seenCapabilities := make(map[string]struct{}, len(hello.Capabilities))
+	for _, capability := range hello.Capabilities {
+		if capability == "" || len(capability) > 64 {
+			return wire.Hello{}, nil, errors.New("connector capability must contain 1 to 64 characters")
+		}
+		if _, exists := seenCapabilities[capability]; exists {
+			return wire.Hello{}, nil, fmt.Errorf("duplicate connector capability %q", capability)
+		}
+		seenCapabilities[capability] = struct{}{}
 	}
 	publicKey, err := identity.ParsePublicKey(hello.PublicKey)
 	if err != nil {

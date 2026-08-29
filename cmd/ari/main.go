@@ -94,6 +94,12 @@ func run(arguments []string) int {
 		if err == nil {
 			return exitCode
 		}
+	case "upload":
+		err = runFileTransfer(runContext, apiClient, commandArguments, true)
+	case "download":
+		err = runFileTransfer(runContext, apiClient, commandArguments, false)
+	case "job":
+		err = runJob(runContext, apiClient, commandArguments)
 	case "shell":
 		var exitCode int
 		exitCode, err = runShell(runContext, apiClient, commandArguments)
@@ -115,6 +121,171 @@ func run(arguments []string) int {
 		return 1
 	}
 	return 0
+}
+
+func runJob(ctx context.Context, apiClient *client.Client, arguments []string) error {
+	if len(arguments) == 0 {
+		return errors.New("usage: ari job {start|list|status|read|cancel|remove} ...")
+	}
+	switch arguments[0] {
+	case "start":
+		return runJobStart(ctx, apiClient, arguments[1:])
+	case "list":
+		if len(arguments) != 2 {
+			return errors.New("usage: ari job list TARGET")
+		}
+		jobs, err := apiClient.ListJobs(ctx, arguments[1])
+		if err != nil {
+			return err
+		}
+		writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(writer, "JOB ID\tSTATE\tEXIT\tCREATED\tCOMMAND")
+		for _, job := range jobs {
+			_, _ = fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\n", job.ID, job.State, job.ExitCode, job.CreatedAt.Local().Format(time.RFC3339), jobDisplay(job))
+		}
+		return writer.Flush()
+	case "status":
+		if len(arguments) != 3 {
+			return errors.New("usage: ari job status TARGET JOB_ID")
+		}
+		job, err := apiClient.JobStatus(ctx, arguments[1], arguments[2])
+		if err != nil {
+			return err
+		}
+		printJob(job)
+		return nil
+	case "read":
+		return runJobRead(ctx, apiClient, arguments[1:])
+	case "cancel":
+		if len(arguments) != 3 {
+			return errors.New("usage: ari job cancel TARGET JOB_ID")
+		}
+		job, err := apiClient.CancelJob(ctx, arguments[1], arguments[2])
+		if err != nil {
+			return err
+		}
+		printJob(job)
+		return nil
+	case "remove":
+		if len(arguments) != 3 {
+			return errors.New("usage: ari job remove TARGET JOB_ID")
+		}
+		return apiClient.RemoveJob(ctx, arguments[1], arguments[2])
+	default:
+		return fmt.Errorf("unknown job command %q", arguments[0])
+	}
+}
+
+func runJobStart(ctx context.Context, apiClient *client.Client, arguments []string) error {
+	flags := flag.NewFlagSet("ari job start", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	cwd := flags.String("cwd", "", "working directory on the node")
+	timeout := flags.Duration("timeout", 0, "optional job runtime limit; zero means no limit")
+	var command string
+	flags.StringVar(&command, "command", "", "command line interpreted by the remote platform shell")
+	flags.StringVar(&command, "c", "", "shorthand for --command")
+	shell := flags.String("shell", "", "shell for --command: auto, posix, powershell, or cmd")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	rest := flags.Args()
+	request := wire.ExecRequest{Command: command, Shell: *shell, Cwd: *cwd, TimeoutMillis: timeout.Milliseconds()}
+	if command != "" {
+		if len(rest) != 1 {
+			return errors.New("usage: ari job start [OPTIONS] --command STRING TARGET")
+		}
+	} else {
+		if len(rest) >= 2 && rest[1] == "--" {
+			rest = append(rest[:1], rest[2:]...)
+		}
+		if len(rest) < 2 {
+			return errors.New("usage: ari job start [OPTIONS] TARGET -- EXECUTABLE [ARG...]")
+		}
+		request.Argv = append([]string(nil), rest[1:]...)
+	}
+	if err := execspec.Validate(request); err != nil {
+		return err
+	}
+	if *timeout < 0 {
+		return errors.New("timeout cannot be negative")
+	}
+	job, err := apiClient.StartJob(ctx, rest[0], request)
+	if err != nil {
+		return err
+	}
+	printJob(job)
+	return nil
+}
+
+func runJobRead(ctx context.Context, apiClient *client.Client, arguments []string) error {
+	flags := flag.NewFlagSet("ari job read", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	stdoutOffset := flags.Int64("stdout-offset", 0, "stdout byte offset")
+	stderrOffset := flags.Int64("stderr-offset", 0, "stderr byte offset")
+	limit := flags.Int("limit", 0, "maximum bytes from each stream")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	rest := flags.Args()
+	if len(rest) != 2 {
+		return errors.New("usage: ari job read [OPTIONS] TARGET JOB_ID")
+	}
+	job, output, err := apiClient.ReadJob(ctx, rest[0], rest[1], *stdoutOffset, *stderrOffset, *limit)
+	if err != nil {
+		return err
+	}
+	_, _ = os.Stdout.Write(output.Stdout)
+	_, _ = os.Stderr.Write(output.Stderr)
+	fmt.Fprintf(os.Stderr, "ari: job %s state=%s next_stdout=%d next_stderr=%d stdout_eof=%t stderr_eof=%t\n", job.ID, job.State, output.NextStdoutOffset, output.NextStderrOffset, output.StdoutEOF, output.StderrEOF)
+	return nil
+}
+
+func printJob(job wire.JobInfo) {
+	fmt.Printf("%s state=%s exit=%d stdout=%d stderr=%d command=%s\n", job.ID, job.State, job.ExitCode, job.StdoutSize, job.StderrSize, jobDisplay(job))
+}
+
+func jobDisplay(job wire.JobInfo) string {
+	if job.Command != "" {
+		return job.Command
+	}
+	return fmt.Sprint(job.Argv)
+}
+
+func runFileTransfer(ctx context.Context, apiClient *client.Client, arguments []string, upload bool) error {
+	name := "ari download"
+	usageText := "usage: ari download [--overwrite] [--timeout DURATION] TARGET REMOTE_PATH LOCAL_PATH"
+	if upload {
+		name = "ari upload"
+		usageText = "usage: ari upload [--overwrite] [--timeout DURATION] TARGET LOCAL_PATH REMOTE_PATH"
+	}
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	overwrite := flags.Bool("overwrite", false, "replace an existing destination atomically")
+	timeout := flags.Duration("timeout", 10*time.Minute, "transfer timeout")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	paths := flags.Args()
+	if len(paths) != 3 {
+		return errors.New(usageText)
+	}
+	if *timeout < time.Millisecond {
+		return errors.New("timeout must be at least 1ms")
+	}
+	transferContext, cancel := context.WithTimeout(ctx, *timeout)
+	defer cancel()
+	var result wire.FileTransferResult
+	var err error
+	if upload {
+		result, err = apiClient.UploadFile(transferContext, paths[0], paths[1], paths[2], *overwrite)
+	} else {
+		result, err = apiClient.DownloadFile(transferContext, paths[0], paths[1], paths[2], *overwrite)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d bytes sha256:%s\n", result.Size, result.SHA256)
+	return nil
 }
 
 func runNodes(ctx context.Context, apiClient *client.Client, arguments []string) error {
@@ -248,6 +419,10 @@ func usage() {
   ari [global flags] claim NODE_ID ALIAS
   ari [global flags] exec [OPTIONS] --command STRING TARGET
   ari [global flags] exec [OPTIONS] TARGET -- EXECUTABLE [ARG...]
+  ari [global flags] upload [OPTIONS] TARGET LOCAL_PATH REMOTE_PATH
+  ari [global flags] download [OPTIONS] TARGET REMOTE_PATH LOCAL_PATH
+  ari [global flags] job start [OPTIONS] --command STRING TARGET
+  ari [global flags] job {list|status|read|cancel|remove} ...
   ari [global flags] shell TARGET
   ari [global flags] proxy TARGET
 

@@ -53,7 +53,13 @@ func run() error {
 	maxConcurrentExec := flags.Int("max-concurrent-exec", 4, "maximum concurrent exec requests")
 	maxExecTimeout := flags.Duration("max-exec-timeout", 10*time.Minute, "maximum exec duration")
 	maxOutput := flags.Int("max-output", 1<<20, "maximum captured bytes for each output stream")
+	maxFileSize := flags.Int64("max-file-size", 1<<30, "maximum upload or download size in bytes")
 	maxStreams := flags.Int("max-streams", 64, "maximum simultaneous shell and SSH proxy streams")
+	maxConcurrentJobs := flags.Int("max-concurrent-jobs", 4, "maximum concurrent background jobs")
+	maxJobOutput := flags.Int64("max-job-output", 16<<20, "maximum spooled bytes for each job output stream")
+	maxRetainedJobs := flags.Int("max-retained-jobs", 64, "maximum retained completed background jobs")
+	maxJobTimeout := flags.Duration("max-job-timeout", 24*time.Hour, "maximum background job timeout")
+	jobRetention := flags.Duration("job-retention", 24*time.Hour, "completed background job retention")
 	verbose := flags.Bool("verbose", false, "enable debug logs")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	flags.Usage = func() { printConnectorUsage(flags) }
@@ -134,7 +140,13 @@ func run() error {
 		MaxConcurrentExec: *maxConcurrentExec,
 		MaxExecTimeout:    *maxExecTimeout,
 		MaxOutputBytes:    *maxOutput,
+		MaxFileBytes:      *maxFileSize,
 		MaxStreams:        *maxStreams,
+		MaxConcurrentJobs: *maxConcurrentJobs,
+		MaxJobOutputBytes: *maxJobOutput,
+		MaxRetainedJobs:   *maxRetainedJobs,
+		MaxJobTimeout:     *maxJobTimeout,
+		JobRetention:      *jobRetention,
 		HTTPClient:        relayTransport.httpClient,
 		Dial:              relayTransport.dial,
 		Logger:            logger,
@@ -186,7 +198,8 @@ func printConnectorUsage(flags *flag.FlagSet) {
   ariadne-connector --relay-ssh USER@HOST[:PORT] --alias ALIAS [options]
 
 Ariadne connector keeps an outgoing node connection to the relay and exposes
-the local shell and structured exec only through requests received from it.
+shell, structured exec, file transfer, and connector-owned background jobs
+only through requests received from the management plane.
 
 Relay addresses:
   HOST                 QUIC on the default port: quic://HOST:47471

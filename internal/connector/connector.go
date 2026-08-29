@@ -30,7 +30,13 @@ type Config struct {
 	MaxConcurrentExec int
 	MaxExecTimeout    time.Duration
 	MaxOutputBytes    int
+	MaxFileBytes      int64
 	MaxStreams        int
+	MaxConcurrentJobs int
+	MaxJobOutputBytes int64
+	MaxRetainedJobs   int
+	MaxJobTimeout     time.Duration
+	JobRetention      time.Duration
 	DialTimeout       time.Duration
 	HTTPClient        *http.Client
 	Dial              func(context.Context) (messageconn.Conn, error)
@@ -44,6 +50,7 @@ type Connector struct {
 	executor   Executor
 	sshServer  *embeddedSSHServer
 	sshHostKey string
+	jobs       *jobManager
 }
 
 func New(config Config, executor Executor) (*Connector, error) {
@@ -78,8 +85,26 @@ func New(config Config, executor Executor) (*Connector, error) {
 	if config.MaxOutputBytes > wire.MaxExecOutputBytes {
 		return nil, fmt.Errorf("max output exceeds protocol limit of %d bytes", wire.MaxExecOutputBytes)
 	}
+	if config.MaxFileBytes <= 0 {
+		config.MaxFileBytes = 1 << 30
+	}
 	if config.MaxStreams <= 0 {
 		config.MaxStreams = 64
+	}
+	if config.MaxConcurrentJobs <= 0 {
+		config.MaxConcurrentJobs = 4
+	}
+	if config.MaxJobOutputBytes <= 0 {
+		config.MaxJobOutputBytes = 16 << 20
+	}
+	if config.MaxRetainedJobs <= 0 {
+		config.MaxRetainedJobs = 64
+	}
+	if config.MaxJobTimeout <= 0 {
+		config.MaxJobTimeout = 24 * time.Hour
+	}
+	if config.JobRetention <= 0 {
+		config.JobRetention = 24 * time.Hour
 	}
 	if config.DialTimeout <= 0 {
 		config.DialTimeout = 10 * time.Second
@@ -105,6 +130,7 @@ func New(config Config, executor Executor) (*Connector, error) {
 		executor:   executor,
 		sshServer:  newEmbeddedSSHServer(hostSigner, config.Shell, config.ShellEnvironment, config.Logger),
 		sshHostKey: base64.RawStdEncoding.EncodeToString(hostSigner.PublicKey().Marshal()),
+		jobs:       newJobManager(config),
 	}, nil
 }
 
@@ -191,6 +217,7 @@ func (connector *Connector) RunOnce(ctx context.Context) error {
 		Platform:         runtime.GOOS,
 		Architecture:     runtime.GOARCH,
 		ConnectorVersion: connector.config.Version,
+		Capabilities:     []string{wire.CapabilityFileTransfer, wire.CapabilityBackgroundJobs},
 	}
 	if err := writeConnectorControl(handshakeContext, connection, wire.MessageHello, "", hello); err != nil {
 		return fmt.Errorf("send connector hello: %w", err)

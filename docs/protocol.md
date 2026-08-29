@@ -16,6 +16,10 @@ Management plane по умолчанию слушает `127.0.0.1:8088`, тре
 - `GET /v1/nodes` — список online-узлов;
 - `POST /v1/nodes/{node_id}/claim` — назначение доверенного alias с management plane;
 - `POST /v1/nodes/{target}/exec` — структурированный exec;
+- `POST /v1/nodes/{target}/jobs` и `GET /v1/nodes/{target}/jobs` — запуск и список фоновых задач;
+- `GET /v1/nodes/{target}/jobs/{job_id}` — состояние задачи;
+- `GET /v1/nodes/{target}/jobs/{job_id}/output` — порционное чтение stdout/stderr;
+- `POST /v1/nodes/{target}/jobs/{job_id}/cancel` и `DELETE /v1/nodes/{target}/jobs/{job_id}` — отмена и удаление;
 - `GET /v1/nodes/{target}/streams/shell` — WebSocket до встроенного одноразового SSH endpoint;
 - `GET /v1/nodes/{target}/streams/ssh` — опциональный WebSocket byte-stream до внешнего локального `sshd`;
 - `GET /healthz` — health endpoint.
@@ -85,6 +89,22 @@ stdout и stderr являются byte strings и кодируются стан�
 
 Connector передаёт процессу своё окружение целиком, чтобы системные и toolchain-команды работали так же, как при локальном запуске. Environment не является security boundary: команда работает с тем же OS UID и в зависимости от платформы может исследовать другие процессы и доступные им файлы. Connector не следует запускать с секретами в environment; настоящая изоляция требует отдельного UID или sandbox. Вывод ограничен отдельно для stdout и stderr.
 
+## Передача файлов
+
+Management plane открывает `streams/file-upload` или `streams/file-download`, указывая remote path и для upload — permission mode и явный `overwrite`. Relay разрешает эти stream только узлам с capability `file-transfer.v1` и передаёт метаданные в `stream.open`.
+
+Файл идёт бинарными data frames размером до 64 KiB. Завершающая сторона сообщает размер и SHA-256, вторая сторона сверяет их со своим потоком. Upload пишется во временный файл в destination directory и публикуется атомарно только после проверки; без `overwrite` существующий destination не заменяется. Download аналогично сначала создаёт локальный временный файл на MCP host. Содержимое файла не кодируется в JSON и не попадает в MCP result: агент получает paths, размер и hash.
+
+Текущая версия передаёт обычные regular files целиком. Resume, каталоги и delta transfer оставлены последующим расширениям.
+
+## Фоновые задачи
+
+Узел с capability `background-jobs.v1` принимает control-сообщения `job.request` и отвечает `job.response`. `start` использует ту же высокоуровневую форму `command`/`argv`, `shell`, `cwd` и необязательный runtime timeout, что и exec, но relay ждёт только запуска процесса. Connector назначает случайный job ID и хранит реестр независимо от конкретной транспортной сессии.
+
+Доступны действия `list`, `status`, `read`, `cancel` и `remove`. `read` принимает независимые `stdout_offset` и `stderr_offset` и возвращает ограниченные фрагменты, следующие offsets и EOF для каждого потока. Connector пишет stdout и stderr в закрытые spool-файлы с отдельными лимитами; при достижении лимита процесс продолжает работать, а результат получает признак truncation. Завершённые записи удаляются по retention и ограничению количества.
+
+Разрыв WSS/QUIC не отменяет процесс: после reconnect той же connector identity management-клиент продолжает обращаться по прежнему job ID. Жизненный цикл заканчивается вместе с процессом connector; v1 не восстанавливает job registry и spool после его перезапуска и не является offline-очередью relay.
+
 ## Встроенный SSH shell
 
 `ari shell TARGET` не использует пользовательские ключи или `authorized_keys`:
@@ -113,7 +133,7 @@ bytes 18..   opaque stream payload, at most 64 KiB
 
 Сообщения `stream.close` и `stream.error` управляют жизненным циклом. Несколько SSH-сессий используют одно connector-соединение и различаются stream ID.
 
-Connector является строго реактивной стороной после регистрации. `exec.result` принимается только для существующего relay request ID, а stream state и бинарные frames — только для stream ID, ранее созданного management plane. Unsolicited result или никогда не выдававшийся relay stream ID считаются нарушением протокола и закрывают node connection; запоздалые frames уже закрытого, но ранее выданного stream безопасно отбрасываются.
+Connector является строго реактивной стороной после регистрации. `exec.result` и `job.response` принимаются только для существующего relay request ID, а stream state и бинарные frames — только для stream ID, ранее созданного management plane. Фоновые процессы могут продолжать работу без активной relay-сессии, но connector никогда сам не отправляет их вывод: management plane должен запросить его после reconnect. Unsolicited result или никогда не выдававшийся relay stream ID считаются нарушением протокола и закрывают node connection; запоздалые frames уже закрытого, но ранее выданного stream безопасно отбрасываются.
 
 Клиентский WebSocket содержит только payload bytes без внутреннего заголовка. `ari shell` передаёт его встроенному Go SSH client, а `ari proxy` преобразует в обычный stdin/stdout byte-stream для OpenSSH `ProxyCommand`.
 
