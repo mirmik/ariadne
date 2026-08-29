@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/mirmik/ariadne/internal/messageconn"
 	"github.com/mirmik/ariadne/internal/wire"
 )
 
 type session struct {
 	connector *Connector
-	conn      *websocket.Conn
+	conn      messageconn.Conn
 	context   context.Context
 	cancel    context.CancelFunc
 
@@ -27,7 +28,7 @@ type session struct {
 	streams   map[string]*localStream
 }
 
-func newSession(parent context.Context, connector *Connector, connection *websocket.Conn) *session {
+func newSession(parent context.Context, connector *Connector, connection messageconn.Conn) *session {
 	sessionContext, cancel := context.WithCancel(parent)
 	return &session{
 		connector: connector,

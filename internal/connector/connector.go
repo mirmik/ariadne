@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/identity"
+	"github.com/mirmik/ariadne/internal/messageconn"
 	"github.com/mirmik/ariadne/internal/wire"
 	"golang.org/x/crypto/ssh"
 )
@@ -32,6 +33,7 @@ type Config struct {
 	MaxStreams        int
 	DialTimeout       time.Duration
 	HTTPClient        *http.Client
+	Dial              func(context.Context) (messageconn.Conn, error)
 	Logger            *slog.Logger
 	ReconnectInitial  time.Duration
 	ReconnectMaximum  time.Duration
@@ -51,11 +53,13 @@ func New(config Config, executor Executor) (*Connector, error) {
 	if !wire.ValidAlias(config.Alias) {
 		return nil, errors.New("alias must match [A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 	}
-	normalizedURL, err := ConnectorURL(config.RelayURL)
-	if err != nil {
-		return nil, err
+	if config.Dial == nil {
+		normalizedURL, err := ConnectorURL(config.RelayURL)
+		if err != nil {
+			return nil, err
+		}
+		config.RelayURL = normalizedURL
 	}
-	config.RelayURL = normalizedURL
 	if config.Version == "" {
 		config.Version = "dev"
 	}
@@ -156,15 +160,25 @@ func (connector *Connector) Run(ctx context.Context) error {
 
 func (connector *Connector) RunOnce(ctx context.Context) error {
 	dialContext, cancelDial := context.WithTimeout(ctx, connector.config.DialTimeout)
-	connection, _, err := websocket.Dial(dialContext, connector.config.RelayURL, &websocket.DialOptions{
-		HTTPClient:      connector.config.HTTPClient,
-		CompressionMode: websocket.CompressionDisabled,
-	})
+	var connection messageconn.Conn
+	var err error
+	if connector.config.Dial != nil {
+		connection, err = connector.config.Dial(dialContext)
+	} else {
+		websocketConnection, _, dialErr := websocket.Dial(dialContext, connector.config.RelayURL, &websocket.DialOptions{
+			HTTPClient:      connector.config.HTTPClient,
+			CompressionMode: websocket.CompressionDisabled,
+		})
+		if dialErr == nil {
+			websocketConnection.SetReadLimit(wire.MaxControlMessageSize)
+			connection = messageconn.WebSocket{Conn: websocketConnection}
+		}
+		err = dialErr
+	}
 	cancelDial()
 	if err != nil {
 		return fmt.Errorf("connect to relay: %w", err)
 	}
-	connection.SetReadLimit(wire.MaxControlMessageSize)
 	defer connection.CloseNow()
 
 	handshakeContext, cancelHandshake := context.WithTimeout(ctx, 10*time.Second)
@@ -229,7 +243,7 @@ func (connector *Connector) RunOnce(ctx context.Context) error {
 	return session.run()
 }
 
-func readConnectorControl(ctx context.Context, connection *websocket.Conn) (wire.Envelope, error) {
+func readConnectorControl(ctx context.Context, connection messageconn.Conn) (wire.Envelope, error) {
 	messageType, data, err := connection.Read(ctx)
 	if err != nil {
 		return wire.Envelope{}, err
@@ -240,7 +254,7 @@ func readConnectorControl(ctx context.Context, connection *websocket.Conn) (wire
 	return wire.DecodeEnvelope(data)
 }
 
-func writeConnectorControl(ctx context.Context, connection *websocket.Conn, messageType wire.MessageType, id string, payload any) error {
+func writeConnectorControl(ctx context.Context, connection messageconn.Conn, messageType wire.MessageType, id string, payload any) error {
 	data, err := wire.MarshalEnvelope(messageType, id, payload)
 	if err != nil {
 		return err

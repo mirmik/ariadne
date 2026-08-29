@@ -11,8 +11,14 @@ vars:
   MANAGEMENT_TOKEN_FILE: '{{default "" .ARIADNE_MANAGEMENT_TOKEN_FILE}}'
   NODE_RELAY: '{{default "http://127.0.0.1:47471" .ARIADNE_NODE_RELAY}}'
   NODE_RELAY_SSH: '{{default "" .ARIADNE_NODE_RELAY_SSH}}'
+  NODE_RELAY_CERT_PIN: '{{default "" .ARIADNE_NODE_RELAY_CERT_PIN}}'
+  NODE_RELAY_FALLBACK: '{{default "auto" .ARIADNE_NODE_RELAY_FALLBACK}}'
   MANAGEMENT_LISTEN: '{{default "127.0.0.1:8088" .ARIADNE_MANAGEMENT_LISTEN}}'
   NODE_LISTEN: '{{default "127.0.0.1:47471" .ARIADNE_NODE_LISTEN}}'
+  NODE_LOOPBACK_LISTEN: '{{default "" .ARIADNE_NODE_LOOPBACK_LISTEN}}'
+  NODE_QUIC_LISTEN: '{{default "" .ARIADNE_NODE_QUIC_LISTEN}}'
+  NODE_TLS_CERT: '{{default "" .ARIADNE_NODE_TLS_CERT}}'
+  NODE_TLS_KEY: '{{default "" .ARIADNE_NODE_TLS_KEY}}'
   NODE_ALIAS: '{{default "phone" .ARIADNE_ALIAS}}'
   NODE: '{{default "phone" .ARIADNE_ALIAS}}'
   ARCH: arm64
@@ -81,7 +87,7 @@ tasks:
   relay:
     desc: Build and run the relay
     deps: [build]
-    cmd: '"{{.BIN_DIR}}/ariadne-relay" --management-listen "{{.MANAGEMENT_LISTEN}}" --node-listen "{{.NODE_LISTEN}}" {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} {{.CLI_ARGS}}'
+    cmd: '"{{.BIN_DIR}}/ariadne-relay" --management-listen "{{.MANAGEMENT_LISTEN}}" --node-listen "{{.NODE_LISTEN}}" {{if .NODE_LOOPBACK_LISTEN}}--node-loopback-listen "{{.NODE_LOOPBACK_LISTEN}}"{{end}} {{if .NODE_QUIC_LISTEN}}--node-quic-listen "{{.NODE_QUIC_LISTEN}}"{{end}} {{if .NODE_TLS_CERT}}--node-tls-cert "{{.NODE_TLS_CERT}}"{{end}} {{if .NODE_TLS_KEY}}--node-tls-key "{{.NODE_TLS_KEY}}"{{end}} {{if .MANAGEMENT_TOKEN_FILE}}--management-token-file "{{.MANAGEMENT_TOKEN_FILE}}"{{end}} {{.CLI_ARGS}}'
 
   mcp:
     desc: Run the Ariadne stdio MCP server
@@ -91,7 +97,7 @@ tasks:
   connector:
     desc: Build and run a connector (NODE_ALIAS=phone by default)
     deps: [build]
-    cmd: '"{{.BIN_DIR}}/ariadne-connector" --relay "{{.NODE_RELAY}}" {{if .NODE_RELAY_SSH}}--relay-ssh "{{.NODE_RELAY_SSH}}"{{end}} --alias "{{.NODE_ALIAS}}" {{.CLI_ARGS}}'
+    cmd: '"{{.BIN_DIR}}/ariadne-connector" --relay "{{.NODE_RELAY}}" {{if .NODE_RELAY_SSH}}--relay-ssh "{{.NODE_RELAY_SSH}}"{{end}} {{if .NODE_RELAY_CERT_PIN}}--relay-cert-pin "{{.NODE_RELAY_CERT_PIN}}"{{end}} --relay-fallback "{{.NODE_RELAY_FALLBACK}}" --alias "{{.NODE_ALIAS}}" {{.CLI_ARGS}}'
 
   nodes:
     desc: List nodes currently connected to the relay

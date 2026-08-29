@@ -20,6 +20,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/identity"
 	"github.com/mirmik/ariadne/internal/managementauth"
+	"github.com/mirmik/ariadne/internal/messageconn"
 	"github.com/mirmik/ariadne/internal/wire"
 	"golang.org/x/crypto/ssh"
 )
@@ -281,15 +282,8 @@ func (server *Server) handleExec(response http.ResponseWriter, request *http.Req
 }
 
 func (server *Server) handleConnector(response http.ResponseWriter, request *http.Request) {
-	handshakeSlotHeld := false
 	select {
 	case server.handshakes <- struct{}{}:
-		handshakeSlotHeld = true
-		defer func() {
-			if handshakeSlotHeld {
-				<-server.handshakes
-			}
-		}()
 	default:
 		writeAPIError(response, http.StatusServiceUnavailable, "too many connector handshakes")
 		return
@@ -297,9 +291,35 @@ func (server *Server) handleConnector(response http.ResponseWriter, request *htt
 	connection, err := websocket.Accept(response, request, nil)
 	if err != nil {
 		server.logger.Warn("connector WebSocket upgrade failed", "error", err)
+		<-server.handshakes
 		return
 	}
 	connection.SetReadLimit(wire.MaxControlMessageSize)
+	server.serveConnector(messageconn.WebSocket{Conn: connection}, true)
+}
+
+// ServeNodeConnection registers and runs one non-HTTP node transport, such as
+// a QUIC control connection. Ownership of connection is transferred here.
+func (server *Server) ServeNodeConnection(connection messageconn.Conn) {
+	server.serveConnector(connection, false)
+}
+
+func (server *Server) serveConnector(connection messageconn.Conn, handshakeSlotHeld bool) {
+	if !handshakeSlotHeld {
+		select {
+		case server.handshakes <- struct{}{}:
+			handshakeSlotHeld = true
+		default:
+			server.writeProtocolError(connection, "capacity", "too many connector handshakes")
+			connection.CloseNow()
+			return
+		}
+	}
+	defer func() {
+		if handshakeSlotHeld {
+			<-server.handshakes
+		}
+	}()
 	defer connection.CloseNow()
 
 	handshakeContext, cancel := context.WithTimeout(server.context, server.config.RegistrationTimeout)
@@ -416,7 +436,7 @@ func (server *Server) claim(nodeID, alias string) (wire.NodeInfo, error) {
 	return session.nodeInfo(), nil
 }
 
-func readAndValidateHello(ctx context.Context, connection *websocket.Conn) (wire.Hello, ed25519.PublicKey, error) {
+func readAndValidateHello(ctx context.Context, connection messageconn.Conn) (wire.Hello, ed25519.PublicKey, error) {
 	envelope, err := readControl(ctx, connection)
 	if err != nil {
 		return wire.Hello{}, nil, err
@@ -468,7 +488,7 @@ func parseWireSSHKey(encoded string) (ssh.PublicKey, error) {
 	return key, nil
 }
 
-func readAndVerifyRegistration(ctx context.Context, connection *websocket.Conn, hello wire.Hello, publicKey ed25519.PublicKey, nonce []byte) error {
+func readAndVerifyRegistration(ctx context.Context, connection messageconn.Conn, hello wire.Hello, publicKey ed25519.PublicKey, nonce []byte) error {
 	envelope, err := readControl(ctx, connection)
 	if err != nil {
 		return err
@@ -503,13 +523,13 @@ func parseNodeAction(path string) (string, string, bool) {
 	return target, parts[1], true
 }
 
-func (server *Server) writeProtocolError(connection *websocket.Conn, code, message string) {
+func (server *Server) writeProtocolError(connection messageconn.Conn, code, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = writeControl(ctx, connection, wire.MessageError, "", wire.ErrorPayload{Code: code, Message: message})
 }
 
-func readControl(ctx context.Context, connection *websocket.Conn) (wire.Envelope, error) {
+func readControl(ctx context.Context, connection messageconn.Conn) (wire.Envelope, error) {
 	messageType, data, err := connection.Read(ctx)
 	if err != nil {
 		return wire.Envelope{}, err
@@ -520,7 +540,7 @@ func readControl(ctx context.Context, connection *websocket.Conn) (wire.Envelope
 	return wire.DecodeEnvelope(data)
 }
 
-func writeControl(ctx context.Context, connection *websocket.Conn, messageType wire.MessageType, id string, payload any) error {
+func writeControl(ctx context.Context, connection messageconn.Conn, messageType wire.MessageType, id string, payload any) error {
 	data, err := wire.MarshalEnvelope(messageType, id, payload)
 	if err != nil {
 		return err

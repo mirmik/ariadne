@@ -4,10 +4,12 @@
 
 ## Transport и endpoints
 
-Node plane по умолчанию использует отдельный порт `47471` и содержит только:
+Node plane по умолчанию использует отдельный порт `47471`. Доступны два
+совместимых транспорта:
 
-- `GET /v1/connect` — постоянный WebSocket connector → relay;
-- `GET /healthz` — health endpoint.
+- QUIC/TLS 1.3 с ALPN `ariadne/1` на UDP;
+- `GET /v1/connect` — постоянный WebSocket connector → relay на TCP;
+- `GET /healthz` — health endpoint TCP listener.
 
 Management plane по умолчанию слушает `127.0.0.1:8088`, требует отдельный bearer token и содержит:
 
@@ -18,15 +20,15 @@ Management plane по умолчанию слушает `127.0.0.1:8088`, тре
 - `GET /v1/nodes/{target}/streams/ssh` — опциональный WebSocket byte-stream до внешнего локального `sshd`;
 - `GET /healthz` — health endpoint.
 
-Node plane не требует предварительно доставленного bearer token: connector доказывает владение своей Ed25519 identity во время handshake. Он не предоставляет endpoints для управления. Management plane использует отдельный случайный 256-bit bearer token; relay создаёт token-файл `0600`, а `ari` читает его локально. Этот административный credential не входит в node bootstrap. Публичный node plane использует HTTPS/WSS.
+Node plane не требует предварительно доставленного bearer token: connector доказывает владение своей Ed25519 identity во время handshake. Он не предоставляет endpoints для управления. Management plane использует отдельный случайный 256-bit bearer token; relay создаёт token-файл `0600`, а `ari` читает его локально. Этот административный credential не входит в node bootstrap. Публичный node plane использует QUIC/TLS или HTTPS/WSS.
 
-Типичный bootstrap не публикует node port через роутер: `ariadne-connector --relay-ssh breakglass@HOST[:PORT]` создаёт SSH local forward до relay `127.0.0.1:47471` и подключает WebSocket через него. Прямая публикация node plane на TCP `47471` с TLS остаётся альтернативой. Management client `ari` обычно работает рядом с relay или через защищённый tunnel и должен иметь token-файл. Plaintext non-loopback listener требует явный `--allow-insecure-management-listen` и раскрывает bearer token наблюдателю сети.
+Для прямого доступа роутер может пробросить UDP и TCP одного внешнего порта на `47471`: connector предпочитает `quic://HOST:PORT`, затем использует WSS fallback. TLS-сертификат проверяется через Web PKI либо точным публичным pin из `--relay-cert-pin`. Старый bootstrap через `ariadne-connector --relay-ssh breakglass@HOST[:PORT]` создаёт SSH local forward до relay `127.0.0.1:47471` и остаётся доступен как fallback для сетей без UDP. Management client `ari` обычно работает рядом с relay или через защищённый tunnel и должен иметь token-файл. Plaintext non-loopback listener требует явный insecure-флаг.
 
 Переданный connector alias является недоверенной подсказкой. В списке узлов он имеет `alias_claimed: false` и не участвует в lookup. Management plane может связать alias с точным `node_id` через `/claim`; только такой alias разрешено использовать как target. Claims сохраняются после reconnect той же identity, но в v1 теряются при перезапуске relay.
 
 ## Регистрация connector
 
-Control-сообщения являются текстовыми WebSocket messages с envelope:
+Control-сообщения являются текстовыми messages с envelope:
 
 ```json
 {
@@ -36,6 +38,14 @@ Control-сообщения являются текстовыми WebSocket messa
   "payload": {}
 }
 ```
+
+В WSS message boundaries задаёт WebSocket. В QUIC v1 connector открывает один
+bidirectional control stream; поверх него message кодируется как `type: u8`,
+`length: u32 big-endian`, `payload`. Типы `1` и `2` соответствуют text и binary,
+а `3`/`4` — ping/pong. Лимит одного message — 4 MiB. Вложенные shell/SSH
+потоки пока используют тот же application-level stream ID framing, поэтому
+переезд транспорта не меняет semantics wire v1. Нативные QUIC streams можно
+добавить следующей версией протокола без изменения регистрации.
 
 Handshake:
 
@@ -83,7 +93,7 @@ Connector передаёт процессу своё окружение цели
 
 Когда клиент подключается к `/streams/shell` или `/streams/ssh`, relay создаёт случайный 128-bit stream ID и отправляет connector сообщение `stream.open`. Поле `protocol` имеет значение `shell` для встроенного endpoint или `ssh` для внешнего proxy. Для `shell` сообщение также содержит одноразовый `ssh_client_public_key`. Для `ssh` connector сам выбирает заранее настроенный адрес локального `sshd`; relay не может попросить его соединиться с произвольным host/port.
 
-После `stream.opened` данные передаются бинарными WebSocket messages по постоянному connector-соединению:
+После `stream.opened` данные передаются бинарными messages по постоянному connector-соединению:
 
 ```text
 byte 0       protocol version (1)

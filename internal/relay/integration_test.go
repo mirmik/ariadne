@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +15,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -22,7 +26,10 @@ import (
 	"github.com/mirmik/ariadne/internal/client"
 	"github.com/mirmik/ariadne/internal/connector"
 	"github.com/mirmik/ariadne/internal/identity"
+	"github.com/mirmik/ariadne/internal/messageconn"
+	"github.com/mirmik/ariadne/internal/quictransport"
 	"github.com/mirmik/ariadne/internal/relay"
+	"github.com/mirmik/ariadne/internal/transport"
 	"github.com/mirmik/ariadne/internal/wire"
 	"golang.org/x/crypto/ssh"
 )
@@ -218,6 +225,212 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	}
 }
 
+func TestRelayConnectorExecAndStreamOverQUIC(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	relayConfig := relay.DefaultConfig()
+	relayConfig.ManagementToken = testManagementToken
+	relayServer := relay.New(relayConfig, logger)
+	defer relayServer.Close()
+	managementServer := startHTTPTestServer(t, relayServer.ManagementHandler())
+	defer managementServer.Close()
+
+	certificatePath, keyPath, certificateDER := quicTestCertificate(t)
+	quicServer, err := quictransport.Listen("127.0.0.1:0", certificatePath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quicContext, cancelQUIC := context.WithCancel(context.Background())
+	quicErrors := make(chan error, 1)
+	go func() {
+		quicErrors <- quicServer.Serve(quicContext, relayServer.ServeNodeConnection)
+	}()
+	defer func() {
+		cancelQUIC()
+		_ = quicServer.Close()
+		<-quicErrors
+	}()
+
+	tlsConfig, err := transport.ClientTLSConfig("127.0.0.1", transport.FormatCertificatePin(certificateDER))
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoAddress, closeEcho := startEchoServer(t)
+	defer closeEcho()
+	nodeIdentity, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeConnector, err := connector.New(connector.Config{
+		Alias:      "quic-node",
+		Identity:   nodeIdentity,
+		SSHAddress: echoAddress,
+		Logger:     logger,
+		Dial: func(ctx context.Context) (messageconn.Conn, error) {
+			return quictransport.Dial(ctx, quicServer.Addr(), tlsConfig)
+		},
+	}, echoExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorContext, cancelConnector := context.WithCancel(context.Background())
+	connectorErrors := make(chan error, 1)
+	go func() { connectorErrors <- nodeConnector.RunOnce(connectorContext) }()
+	defer func() {
+		cancelConnector()
+		select {
+		case <-connectorErrors:
+		case <-time.After(2 * time.Second):
+			t.Error("QUIC connector did not stop")
+		}
+	}()
+
+	apiClient, err := client.New(client.Config{
+		RelayURL:        managementServer.URL,
+		ManagementToken: testManagementToken,
+		HTTPClient:      managementServer.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := waitForNode(t, apiClient, "quic-node")
+	if _, err := apiClient.Claim(context.Background(), node.ID, "quic-node"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := apiClient.Exec(context.Background(), "quic-node", wire.ExecRequest{
+		Argv:          []string{"echo", "over-quic"},
+		TimeoutMillis: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || string(result.Stdout) != "echo\x00over-quic" {
+		t.Fatalf("unexpected QUIC exec result: %#v", result)
+	}
+
+	streamContext, cancelStream := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelStream()
+	stream, err := apiClient.DialStream(streamContext, "quic-node", "ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.CloseNow()
+	payload := []byte("opaque payload over QUIC")
+	if err := stream.Write(streamContext, websocket.MessageBinary, payload); err != nil {
+		t.Fatal(err)
+	}
+	messageType, echoed, err := stream.Read(streamContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageBinary || string(echoed) != string(payload) {
+		t.Fatalf("unexpected QUIC stream reply: type=%v payload=%q", messageType, echoed)
+	}
+}
+
+func TestQUICConnectorReconnectsAfterTransportRestart(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	relayConfig := relay.DefaultConfig()
+	relayConfig.ManagementToken = testManagementToken
+	relayServer := relay.New(relayConfig, logger)
+	managementServer := startHTTPTestServer(t, relayServer.ManagementHandler())
+
+	certificatePath, keyPath, certificateDER := quicTestCertificate(t)
+	firstQUICServer, err := quictransport.Listen("127.0.0.1:0", certificatePath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := firstQUICServer.Addr()
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstErrors := make(chan error, 1)
+	go func() {
+		firstErrors <- firstQUICServer.Serve(firstContext, relayServer.ServeNodeConnection)
+	}()
+
+	tlsConfig, err := transport.ClientTLSConfig("127.0.0.1", transport.FormatCertificatePin(certificateDER))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeIdentity, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeConnector, err := connector.New(connector.Config{
+		Alias:            "reconnecting-node",
+		Identity:         nodeIdentity,
+		Logger:           logger,
+		ReconnectInitial: 10 * time.Millisecond,
+		ReconnectMaximum: 50 * time.Millisecond,
+		DialTimeout:      500 * time.Millisecond,
+		Dial: func(ctx context.Context) (messageconn.Conn, error) {
+			return quictransport.Dial(ctx, address, tlsConfig)
+		},
+	}, echoExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorContext, cancelConnector := context.WithCancel(context.Background())
+	connectorErrors := make(chan error, 1)
+	go func() { connectorErrors <- nodeConnector.Run(connectorContext) }()
+
+	apiClient, err := client.New(client.Config{
+		RelayURL:        managementServer.URL,
+		ManagementToken: testManagementToken,
+		HTTPClient:      managementServer.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstNode := waitForNode(t, apiClient, "reconnecting-node")
+	if _, err := apiClient.Claim(context.Background(), firstNode.ID, "reconnecting-node"); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelFirst()
+	if err := firstQUICServer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-firstErrors
+	waitForNoNodes(t, apiClient)
+
+	secondQUICServer, err := quictransport.Listen(address, certificatePath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondContext, cancelSecond := context.WithCancel(context.Background())
+	secondErrors := make(chan error, 1)
+	go func() {
+		secondErrors <- secondQUICServer.Serve(secondContext, relayServer.ServeNodeConnection)
+	}()
+	defer func() {
+		cancelConnector()
+		select {
+		case <-connectorErrors:
+		case <-time.After(2 * time.Second):
+			t.Error("reconnecting connector did not stop")
+		}
+		cancelSecond()
+		_ = secondQUICServer.Close()
+		<-secondErrors
+		managementServer.Close()
+		relayServer.Close()
+	}()
+
+	secondNode := waitForNode(t, apiClient, "reconnecting-node")
+	if secondNode.ID != firstNode.ID || !secondNode.AliasClaimed {
+		t.Fatalf("reconnected node lost identity or claim: before=%#v after=%#v", firstNode, secondNode)
+	}
+	result, err := apiClient.Exec(context.Background(), "reconnecting-node", wire.ExecRequest{
+		Argv:          []string{"echo", "after-reconnect"},
+		TimeoutMillis: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Stdout) != "echo\x00after-reconnect" {
+		t.Fatalf("unexpected post-reconnect result: %#v", result)
+	}
+}
+
 func startHTTPTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -228,6 +441,27 @@ func startHTTPTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	server.Listener = listener
 	server.Start()
 	return server
+}
+
+func quicTestCertificate(t *testing.T) (string, string, []byte) {
+	t.Helper()
+	tlsServer := httptest.NewTLSServer(http.NotFoundHandler())
+	certificate := tlsServer.TLS.Certificates[0]
+	tlsServer.Close()
+	privateDER, err := x509.MarshalPKCS8PrivateKey(certificate.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	certificatePath := filepath.Join(directory, "relay.crt")
+	keyPath := filepath.Join(directory, "relay.key")
+	if err := os.WriteFile(certificatePath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certificatePath, keyPath, certificate.Certificate[0]
 }
 
 func assertPlaneIsolation(t *testing.T, nodeServer, managementServer *httptest.Server) {
@@ -289,6 +523,21 @@ func waitForNode(t *testing.T, apiClient *client.Client, alias string) wire.Node
 	}
 	t.Fatalf("node %q did not come online", alias)
 	return wire.NodeInfo{}
+}
+
+func waitForNoNodes(t *testing.T, apiClient *client.Client) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		nodes, err := apiClient.Nodes(ctx)
+		cancel()
+		if err == nil && len(nodes) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("relay still reports nodes after QUIC transport shutdown")
 }
 
 func startEchoServer(t *testing.T) (string, func()) {

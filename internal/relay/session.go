@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/mirmik/ariadne/internal/messageconn"
 	"github.com/mirmik/ariadne/internal/wire"
 )
 
 type nodeSession struct {
 	server *Server
-	conn   *websocket.Conn
+	conn   messageconn.Conn
 	infoMu sync.RWMutex
 	info   wire.NodeInfo
 
@@ -48,7 +49,7 @@ func (session *nodeSession) setClaimedAlias(alias string) {
 	session.infoMu.Unlock()
 }
 
-func newNodeSession(server *Server, connection *websocket.Conn, info wire.NodeInfo) *nodeSession {
+func newNodeSession(server *Server, connection messageconn.Conn, info wire.NodeInfo) *nodeSession {
 	return &nodeSession{
 		server:  server,
 		conn:    connection,

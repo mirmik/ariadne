@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/mirmik/ariadne/internal/cliargs"
 	"github.com/mirmik/ariadne/internal/client"
 	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/sshtunnel"
@@ -22,7 +23,7 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	os.Exit(run(cliargs.Current()))
 }
 
 func run(arguments []string) int {

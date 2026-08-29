@@ -1,6 +1,6 @@
 # Ariadne
 
-Ariadne даёт агенту или человеку доступ к машине за NAT по стабильному имени. Машина сама держит исходящее WebSocket-соединение с relay; входящий порт, отдельный `sshd` и ручная раскладка SSH-ключей для минимального сценария не нужны.
+Ariadne даёт агенту или человеку доступ к машине за NAT по стабильному имени. Машина сама держит исходящее QUIC- или WebSocket-соединение с relay; входящий порт, отдельный `sshd` и ручная раскладка SSH-ключей для минимального сценария не нужны.
 
 Репозиторий пока содержит экспериментальный, но уже сквозной MVP:
 
@@ -18,7 +18,7 @@ ari shell / ari exec
         ▼
    ariadne-relay
         ▲
-        │ исходящее WSS через отдельный node plane (:47471)
+        │ исходящее QUIC/UDP, с WSS/TCP fallback (:47471)
         │
  ariadne-connector ── PTY ── shell того же OS-пользователя
 ```
@@ -218,19 +218,55 @@ ariadne-connector \
 
 SSH port после двоеточия необязателен; без него OpenSSH использует config или порт `22`. OpenSSH запрашивает временный break-glass пароль, создаёт local forward до `127.0.0.1:47471` на relay и остаётся дочерним процессом connector. После истечения password TTL установленный tunnel продолжает работать. Если SSH-соединение оборвётся, connector завершится: для нового входа нужно снова открыть break-glass окно и перезапустить connector.
 
-`ari` в основном сценарии работает рядом с relay и обращается к `http://127.0.0.1:8088`, используя локальный management token. Для другой доверенной management-машины token-файл нужно безопасно доставить отдельно, а соединение провести через SSH tunnel или TLS reverse proxy. Явный `--allow-insecure-management-listen` разрешает plaintext bearer token на non-loopback адресе и предназначен только для изолированной доверенной сети. Режим `ari --relay-ssh` сохранён как вспомогательный вариант; на машине с `ari` всё равно должен быть management token-файл.
+`ari` в основном сценарии работает рядом с relay и обращается к `http://127.0.0.1:8088`, используя локальный management token. Для другой доверенной management-машины token-файл нужно безопасно доставить отдельно, а соединение провести через SSH tunnel или TLS. Явный `--allow-insecure-management-listen` разрешает plaintext bearer token на non-loopback адресе и предназначен только для изолированной доверенной сети. Режим `ari --relay-ssh` сохранён как вспомогательный вариант; на машине с `ari` всё равно должен быть management token-файл.
 
-Альтернативный режим — напрямую опубликовать node plane. Тогда настройте TLS и пробросьте только TCP `47471`:
+Relay может публиковать management plane напрямую с TLS. Token-файл нужно
+отдельно и безопасно доставить только доверенным управляющим машинам:
+
+```bash
+ariadne-relay \
+  --management-listen 192.168.0.61:8088 \
+  --management-tls-cert /path/management.crt \
+  --management-tls-key /path/management.key
+
+ariadne-mcp \
+  --relay https://192.168.0.61:8088 \
+  --management-token-file ~/.config/ariadne/management.token
+```
+
+Для сертификата от локальной CA укажите доверенный CA bundle через штатный
+`SSL_CERT_FILE` окружения процесса `ariadne-mcp`. Management TLS и node TLS
+настраиваются независимо.
+
+Для прямого подключения удалённых нод relay может слушать QUIC/UDP и WSS/TCP
+на одном номере порта. Для self-signed сертификата connector проверяет точный
+SHA-256 pin; это публичная identity relay, а не bootstrap-секрет:
 
 ```bash
 ./bin/ariadne-relay \
   --management-listen 127.0.0.1:8088 \
-  --node-listen 0.0.0.0:47471 \
+  --node-listen 192.168.0.61:47471 \
+  --node-loopback-listen 127.0.0.1:47471 \
+  --node-quic-listen 192.168.0.61:47471 \
   --node-tls-cert /path/fullchain.pem \
   --node-tls-key /path/privkey.pem
+
+./bin/ariadne-connector \
+  --relay quic://relay.example:47471 \
+  --relay-cert-pin sha256:HEX_DIGEST \
+  --alias workstation
 ```
 
-Connector подключается к `https://relay.example:47471`. Management plane через роутер не публикуется. При необходимости разового внешнего управления `ari` может создать вспомогательный tunnel:
+Relay печатает pin node-сертификата при запуске. При сертификате от публичной
+CA `--relay-cert-pin` можно опустить. Для автоматического fallback нужно
+пробросить на relay и UDP, и TCP `47471`; connector сначала использует QUIC, а
+через четыре секунды пробует `https://relay.example:47471/v1/connect`. Fallback
+можно отключить флагом `--relay-fallback none` или заменить отдельным URL.
+Management plane через роутер не публикуется.
+Дополнительный `--node-loopback-listen` сохраняет plaintext endpoint только на
+loopback для режима `--relay-ssh`; наружу он не доступен.
+
+При необходимости разового внешнего управления `ari` может создать вспомогательный tunnel:
 
 ```bash
 ari --relay-ssh breakglass@relay-host nodes
@@ -239,7 +275,7 @@ ari --relay-ssh breakglass@relay-host shell phone
 
 Обе программы используют системный OpenSSH и выбирают свободный loopback-порт. Ручной `ssh -L` также поддерживается.
 
-У connector нет bootstrap bearer token. Публичный node plane принимает новые self-authenticated Ed25519 identities, но не содержит управляющих endpoints. Отдельный management bearer token защищает `nodes`, `claim`, `exec` и stream endpoints даже на loopback. Management plane по умолчанию разрешено привязать только к loopback. Флаги `--allow-insecure-management-listen`, `--allow-insecure-node-listen` и `--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
+У connector нет bootstrap bearer token. Публичный node plane принимает новые self-authenticated Ed25519 identities, но не содержит управляющих endpoints. QUIC использует TLS 1.3, ALPN `ariadne/1`, отключённый 0-RTT и keepalive; при разрыве connector переподключается с той же identity. Отдельный management bearer token защищает `nodes`, `claim`, `exec` и stream endpoints даже на loopback. Management plane по умолчанию разрешено привязать только к loopback. Флаги `--allow-insecure-management-listen`, `--allow-insecure-node-listen` и `--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
 
 ## Текущие ограничения
 

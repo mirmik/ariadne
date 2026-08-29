@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mirmik/ariadne/internal/cliargs"
 	"github.com/mirmik/ariadne/internal/connector"
 	"github.com/mirmik/ariadne/internal/identity"
 	"github.com/mirmik/ariadne/internal/sshtunnel"
@@ -34,6 +35,8 @@ func run() error {
 	flags := flag.NewFlagSet("ariadne-connector", flag.ContinueOnError)
 	relayURL := flags.String("relay", "http://127.0.0.1:47471", "node-plane relay base URL")
 	relaySSH := flags.String("relay-ssh", "", "reach node plane through OpenSSH (user@host or user@host:port)")
+	relayCertificatePin := flags.String("relay-cert-pin", "", "optional SHA-256 pin of the relay TLS leaf certificate")
+	relayFallback := flags.String("relay-fallback", "auto", "WSS fallback for quic:// relay: auto, none, or an HTTPS/WSS URL")
 	alias := flags.String("alias", "", "reported human-readable label (claimed on the management plane)")
 	identityPath := flags.String("identity", defaultIdentityPath, "persistent Ed25519 identity file")
 	sshAddress := flags.String("ssh-address", "127.0.0.1:8022", "optional local sshd TCP address used by ari proxy")
@@ -45,7 +48,7 @@ func run() error {
 	maxStreams := flags.Int("max-streams", 64, "maximum simultaneous shell and SSH proxy streams")
 	verbose := flags.Bool("verbose", false, "enable debug logs")
 	showVersion := flags.Bool("version", false, "print version and exit")
-	if err := flags.Parse(os.Args[1:]); err != nil {
+	if err := flags.Parse(cliargs.Current()); err != nil {
 		return err
 	}
 	if *showVersion {
@@ -77,8 +80,20 @@ func run() error {
 		defer tunnel.Close()
 		*relayURL = tunnel.URL
 	}
-	if err := transport.ValidateRelayURL(*relayURL, *allowInsecureRelay); err != nil {
+	relayTransport, err := configureRelayTransport(*relayURL, *relayFallback, *relayCertificatePin, logger)
+	if err != nil {
 		return err
+	}
+	if relayTransport.dial == nil {
+		if err := transport.ValidateRelayURL(relayTransport.url, *allowInsecureRelay); err != nil {
+			return err
+		}
+	}
+	if tunnel != nil && relayTransport.dial != nil {
+		return errors.New("--relay-ssh cannot be combined with a QUIC relay URL")
+	}
+	if tunnel != nil && *relayCertificatePin != "" {
+		return errors.New("--relay-cert-pin is not used with --relay-ssh")
 	}
 	nodeIdentity, created, err := identity.LoadOrCreate(*identityPath)
 	if err != nil {
@@ -88,7 +103,7 @@ func run() error {
 		logger.Info("created node identity", "path", *identityPath, "node_id", nodeIdentity.NodeID())
 	}
 	instance, err := connector.New(connector.Config{
-		RelayURL:          *relayURL,
+		RelayURL:          relayTransport.url,
 		Alias:             *alias,
 		Version:           version,
 		Identity:          nodeIdentity,
@@ -98,6 +113,8 @@ func run() error {
 		MaxExecTimeout:    *maxExecTimeout,
 		MaxOutputBytes:    *maxOutput,
 		MaxStreams:        *maxStreams,
+		HTTPClient:        relayTransport.httpClient,
+		Dial:              relayTransport.dial,
 		Logger:            logger,
 	}, nil)
 	if err != nil {

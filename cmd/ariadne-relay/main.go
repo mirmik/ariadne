@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mirmik/ariadne/internal/managementauth"
+	"github.com/mirmik/ariadne/internal/quictransport"
 	"github.com/mirmik/ariadne/internal/relay"
 	"github.com/mirmik/ariadne/internal/transport"
 )
@@ -33,7 +34,11 @@ func run() error {
 	}
 	flags := flag.NewFlagSet("ariadne-relay", flag.ContinueOnError)
 	managementListen := flags.String("management-listen", "127.0.0.1:8088", "loopback-only management HTTP listen address")
+	managementTLSCertificate := flags.String("management-tls-cert", "", "management-plane TLS certificate path")
+	managementTLSKey := flags.String("management-tls-key", "", "management-plane TLS private key path")
 	nodeListen := flags.String("node-listen", "127.0.0.1:47471", "connector-facing HTTP listen address")
+	nodeLoopbackListen := flags.String("node-loopback-listen", "", "optional additional plaintext loopback node listener for SSH tunnels")
+	nodeQUICListen := flags.String("node-quic-listen", "", "optional connector-facing QUIC listen address")
 	nodeTLSCertificate := flags.String("node-tls-cert", "", "node-plane TLS certificate path")
 	nodeTLSKey := flags.String("node-tls-key", "", "node-plane TLS private key path")
 	allowInsecureManagementListen := flags.Bool("allow-insecure-management-listen", false, "allow plaintext management HTTP on a trusted non-loopback network")
@@ -54,14 +59,35 @@ func run() error {
 	if (*nodeTLSCertificate == "") != (*nodeTLSKey == "") {
 		return errors.New("--node-tls-cert and --node-tls-key must be provided together")
 	}
-	if err := transport.ValidateListenAddress(*managementListen, false, *allowInsecureManagementListen); err != nil {
+	if *nodeQUICListen != "" && *nodeTLSCertificate == "" {
+		return errors.New("--node-quic-listen requires --node-tls-cert and --node-tls-key")
+	}
+	if (*managementTLSCertificate == "") != (*managementTLSKey == "") {
+		return errors.New("--management-tls-cert and --management-tls-key must be provided together")
+	}
+	if err := transport.ValidateListenAddress(
+		*managementListen,
+		*managementTLSCertificate != "",
+		*allowInsecureManagementListen,
+	); err != nil {
 		return fmt.Errorf("management listener: %w", err)
 	}
 	if err := transport.ValidateListenAddress(*nodeListen, *nodeTLSCertificate != "", *allowInsecureNodeListen); err != nil {
 		return fmt.Errorf("node listener: %w", err)
 	}
+	if *nodeLoopbackListen != "" {
+		if err := transport.ValidateListenAddress(*nodeLoopbackListen, false, false); err != nil {
+			return fmt.Errorf("node loopback listener: %w", err)
+		}
+		if *nodeLoopbackListen == *nodeListen {
+			return errors.New("node and node loopback listeners must use different addresses")
+		}
+	}
 	if *managementListen == *nodeListen {
 		return errors.New("management and node listeners must use different addresses")
+	}
+	if *nodeLoopbackListen != "" && *managementListen == *nodeLoopbackListen {
+		return errors.New("management and node loopback listeners must use different addresses")
 	}
 
 	level := slog.LevelInfo
@@ -84,6 +110,8 @@ func run() error {
 	relayConfig.ManagementToken = managementToken
 	relayServer := relay.New(relayConfig, logger)
 	defer relayServer.Close()
+	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	managementServer := &http.Server{
 		Addr:              *managementListen,
@@ -99,15 +127,45 @@ func run() error {
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    32 << 10,
 	}
+	var nodeLoopbackServer *http.Server
+	if *nodeLoopbackListen != "" {
+		nodeLoopbackServer = &http.Server{
+			Addr:              *nodeLoopbackListen,
+			Handler:           relayServer.NodeHandler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+			MaxHeaderBytes:    32 << 10,
+		}
+	}
 	type serverResult struct {
 		name string
 		err  error
 	}
-	serverErrors := make(chan serverResult, 2)
+	serverErrors := make(chan serverResult, 4)
 	go func() {
-		logger.Info("management plane listening", "address", *managementListen)
+		logger.Info(
+			"management plane listening",
+			"address", *managementListen,
+			"tls", *managementTLSCertificate != "",
+		)
+		if *managementTLSCertificate != "" {
+			serverErrors <- serverResult{
+				name: "management",
+				err: managementServer.ListenAndServeTLS(
+					*managementTLSCertificate,
+					*managementTLSKey,
+				),
+			}
+			return
+		}
 		serverErrors <- serverResult{name: "management", err: managementServer.ListenAndServe()}
 	}()
+	if nodeLoopbackServer != nil {
+		go func() {
+			logger.Info("node loopback plane listening", "address", *nodeLoopbackListen, "tls", false)
+			serverErrors <- serverResult{name: "node loopback", err: nodeLoopbackServer.ListenAndServe()}
+		}()
+	}
 	go func() {
 		logger.Info("node plane listening", "address", *nodeListen, "tls", *nodeTLSCertificate != "")
 		if *nodeTLSCertificate != "" {
@@ -116,25 +174,49 @@ func run() error {
 		}
 		serverErrors <- serverResult{name: "node", err: nodeServer.ListenAndServe()}
 	}()
+	var nodeQUICServer *quictransport.Server
+	if *nodeQUICListen != "" {
+		nodeQUICServer, err = quictransport.Listen(*nodeQUICListen, *nodeTLSCertificate, *nodeTLSKey)
+		if err != nil {
+			return err
+		}
+		go func() {
+			logger.Info(
+				"node QUIC plane listening",
+				"address", nodeQUICServer.Addr(),
+				"tls", true,
+				"certificate_pin", nodeQUICServer.CertificatePin(),
+			)
+			serverErrors <- serverResult{
+				name: "node QUIC",
+				err:  nodeQUICServer.Serve(signalContext, relayServer.ServeNodeConnection),
+			}
+		}()
+	}
 
-	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	var runError error
 	select {
 	case result := <-serverErrors:
-		if !errors.Is(result.err, http.ErrServerClosed) {
+		if !errors.Is(result.err, http.ErrServerClosed) && !errors.Is(result.err, context.Canceled) {
 			runError = fmt.Errorf("%s server: %w", result.name, result.err)
 		}
 	case <-signalContext.Done():
 	}
 
 	relayServer.Close()
+	if nodeQUICServer != nil {
+		_ = nodeQUICServer.Close()
+	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	shutdownError := errors.Join(
+	shutdownErrors := []error{
 		managementServer.Shutdown(shutdownContext),
 		nodeServer.Shutdown(shutdownContext),
-	)
+	}
+	if nodeLoopbackServer != nil {
+		shutdownErrors = append(shutdownErrors, nodeLoopbackServer.Shutdown(shutdownContext))
+	}
+	shutdownError := errors.Join(shutdownErrors...)
 	if runError != nil || shutdownError != nil {
 		return errors.Join(runError, shutdownError)
 	}

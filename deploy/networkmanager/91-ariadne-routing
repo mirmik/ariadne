@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="${ARIADNE_ROUTING_CONFIG:-/etc/default/ariadne-routing}"
+
+if [[ ! -r "${CONFIG_FILE}" ]]; then
+    logger -t ariadne-routing "configuration ${CONFIG_FILE} is missing or unreadable"
+    exit 0
+fi
+
+# The configuration is root-owned and may override all site-specific values.
+# shellcheck source=/dev/null
+source "${CONFIG_FILE}"
+
+: "${ARIADNE_ROUTING_IFACE:?ARIADNE_ROUTING_IFACE is required}"
+: "${ARIADNE_ROUTING_LAN_IP:?ARIADNE_ROUTING_LAN_IP is required}"
+: "${ARIADNE_ROUTING_GATEWAY:?ARIADNE_ROUTING_GATEWAY is required}"
+: "${ARIADNE_ROUTING_LAN_CIDR:?ARIADNE_ROUTING_LAN_CIDR is required}"
+
+ROUTE_TABLE="${ARIADNE_ROUTING_TABLE:-1061}"
+NODE_PORT="${ARIADNE_NODE_PORT:-47471}"
+QUIC_RULE_PREF="${ARIADNE_QUIC_RULE_PREF:-10065}"
+WSS_RULE_PREF="${ARIADNE_WSS_RULE_PREF:-10066}"
+
+case "${2:-}" in
+    up|dhcp4-change|connectivity-change|vpn-up|vpn-down)
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+if [[ "${1:-}" != "${ARIADNE_ROUTING_IFACE}" ]]; then
+    exit 0
+fi
+
+ip route replace default \
+    via "${ARIADNE_ROUTING_GATEWAY}" \
+    dev "${ARIADNE_ROUTING_IFACE}" \
+    src "${ARIADNE_ROUTING_LAN_IP}" \
+    table "${ROUTE_TABLE}"
+ip route replace "${ARIADNE_ROUTING_LAN_CIDR}" \
+    dev "${ARIADNE_ROUTING_IFACE}" \
+    src "${ARIADNE_ROUTING_LAN_IP}" \
+    table "${ROUTE_TABLE}"
+
+ip rule del pref "${QUIC_RULE_PREF}" 2>/dev/null || true
+ip rule del pref "${WSS_RULE_PREF}" 2>/dev/null || true
+ip rule add pref "${QUIC_RULE_PREF}" ipproto udp sport "${NODE_PORT}" lookup "${ROUTE_TABLE}"
+ip rule add pref "${WSS_RULE_PREF}" ipproto tcp sport "${NODE_PORT}" lookup "${ROUTE_TABLE}"
+
+logger -t ariadne-routing \
+    "forced udp/tcp sport ${NODE_PORT} through ${ARIADNE_ROUTING_GATEWAY} table ${ROUTE_TABLE}"
