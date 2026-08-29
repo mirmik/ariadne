@@ -14,6 +14,7 @@ import (
 	"github.com/mirmik/ariadne/internal/cliargs"
 	"github.com/mirmik/ariadne/internal/connector"
 	"github.com/mirmik/ariadne/internal/identity"
+	"github.com/mirmik/ariadne/internal/knownrelay"
 	"github.com/mirmik/ariadne/internal/sshtunnel"
 	"github.com/mirmik/ariadne/internal/transport"
 )
@@ -32,10 +33,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defaultKnownRelaysPath, err := knownrelay.DefaultPath()
+	if err != nil {
+		return err
+	}
 	flags := flag.NewFlagSet("ariadne-connector", flag.ContinueOnError)
 	relayURL := flags.String("relay", "http://127.0.0.1:47471", "node-plane relay base URL")
 	relaySSH := flags.String("relay-ssh", "", "reach node plane through OpenSSH (user@host or user@host:port)")
-	relayCertificatePin := flags.String("relay-cert-pin", "", "optional SHA-256 pin of the relay TLS leaf certificate")
+	relayCertificatePin := flags.String("relay-cert-pin", "", "optional pre-provisioned SHA-256 pin of the relay TLS leaf certificate")
+	knownRelaysPath := flags.String("known-relays-file", defaultKnownRelaysPath, "TOFU relay certificate store")
+	acceptNewRelayCertificate := flags.Bool("accept-new-relay-certificate", false, "explicitly accept one changed relay certificate in the TOFU store")
 	relayFallback := flags.String("relay-fallback", "auto", "WSS fallback for quic:// relay: auto, none, or an HTTPS/WSS URL")
 	alias := flags.String("alias", "", "reported human-readable label (claimed on the management plane)")
 	identityPath := flags.String("identity", defaultIdentityPath, "persistent Ed25519 identity file")
@@ -70,6 +77,12 @@ func run() error {
 	defer stop()
 	var tunnel *sshtunnel.Tunnel
 	if *relaySSH != "" {
+		if *relayCertificatePin != "" {
+			return errors.New("--relay-cert-pin is not used with --relay-ssh")
+		}
+		if *acceptNewRelayCertificate {
+			return errors.New("--accept-new-relay-certificate is not used with --relay-ssh")
+		}
 		tunnel, err = sshtunnel.Start(runContext, sshtunnel.Config{
 			Destination:   *relaySSH,
 			RemoteAddress: "127.0.0.1:47471",
@@ -80,7 +93,14 @@ func run() error {
 		defer tunnel.Close()
 		*relayURL = tunnel.URL
 	}
-	relayTransport, err := configureRelayTransport(*relayURL, *relayFallback, *relayCertificatePin, logger)
+	relayTransport, err := configureRelayTransport(
+		*relayURL,
+		*relayFallback,
+		*relayCertificatePin,
+		*knownRelaysPath,
+		*acceptNewRelayCertificate,
+		logger,
+	)
 	if err != nil {
 		return err
 	}
@@ -91,9 +111,6 @@ func run() error {
 	}
 	if tunnel != nil && relayTransport.dial != nil {
 		return errors.New("--relay-ssh cannot be combined with a QUIC relay URL")
-	}
-	if tunnel != nil && *relayCertificatePin != "" {
-		return errors.New("--relay-cert-pin is not used with --relay-ssh")
 	}
 	nodeIdentity, created, err := identity.LoadOrCreate(*identityPath)
 	if err != nil {

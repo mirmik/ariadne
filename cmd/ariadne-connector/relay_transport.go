@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/connector"
+	"github.com/mirmik/ariadne/internal/knownrelay"
 	"github.com/mirmik/ariadne/internal/messageconn"
 	"github.com/mirmik/ariadne/internal/quictransport"
 	"github.com/mirmik/ariadne/internal/transport"
@@ -28,20 +30,27 @@ type configuredRelayTransport struct {
 	dial       func(context.Context) (messageconn.Conn, error)
 }
 
-func configureRelayTransport(rawURL, fallbackValue, pin string, logger *slog.Logger) (configuredRelayTransport, error) {
+func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string, acceptNewCertificate bool, logger *slog.Logger) (configuredRelayTransport, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return configuredRelayTransport{}, fmt.Errorf("parse relay URL: %w", err)
 	}
 	if !strings.EqualFold(parsed.Scheme, "quic") {
 		result := configuredRelayTransport{url: rawURL}
-		if pin == "" {
+		if parsed.Scheme != "https" && parsed.Scheme != "wss" {
+			if pin != "" {
+				return configuredRelayTransport{}, errors.New("--relay-cert-pin requires a TLS relay URL")
+			}
+			if acceptNewCertificate {
+				return configuredRelayTransport{}, errors.New("--accept-new-relay-certificate requires a TLS relay URL")
+			}
 			return result, nil
 		}
-		if parsed.Scheme != "https" && parsed.Scheme != "wss" {
-			return configuredRelayTransport{}, errors.New("--relay-cert-pin requires a TLS relay URL")
+		trust, err := newRelayCertificateTrust(pin, knownRelaysPath, acceptNewCertificate, logger)
+		if err != nil {
+			return configuredRelayTransport{}, err
 		}
-		tlsConfig, err := transport.ClientTLSConfig(parsed.Hostname(), pin)
+		tlsConfig, err := trust.tlsConfig(parsed, "443")
 		if err != nil {
 			return configuredRelayTransport{}, err
 		}
@@ -56,7 +65,11 @@ func configureRelayTransport(rawURL, fallbackValue, pin string, logger *slog.Log
 	if parsed.Port() == "" {
 		address = net.JoinHostPort(parsed.Hostname(), defaultNodePort)
 	}
-	tlsConfig, err := transport.ClientTLSConfig(parsed.Hostname(), pin)
+	trust, err := newRelayCertificateTrust(pin, knownRelaysPath, acceptNewCertificate, logger)
+	if err != nil {
+		return configuredRelayTransport{}, err
+	}
+	tlsConfig, err := trust.tlsConfig(parsed, defaultNodePort)
 	if err != nil {
 		return configuredRelayTransport{}, err
 	}
@@ -74,7 +87,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin string, logger *slog.Log
 		if err != nil {
 			return configuredRelayTransport{}, fmt.Errorf("parse relay fallback URL: %w", err)
 		}
-		fallbackTLSConfig, err := transport.ClientTLSConfig(fallbackParsed.Hostname(), pin)
+		fallbackTLSConfig, err := trust.tlsConfig(fallbackParsed, "443")
 		if err != nil {
 			return configuredRelayTransport{}, err
 		}
@@ -111,6 +124,87 @@ func configureRelayTransport(rawURL, fallbackValue, pin string, logger *slog.Log
 			return messageconn.WebSocket{Conn: websocketConnection}, nil
 		},
 	}, nil
+}
+
+type relayCertificateTrust struct {
+	pin                  string
+	store                *knownrelay.Store
+	acceptNewCertificate bool
+	logger               *slog.Logger
+	mu                   sync.Mutex
+}
+
+func newRelayCertificateTrust(pin, knownRelaysPath string, acceptNewCertificate bool, logger *slog.Logger) (*relayCertificateTrust, error) {
+	if pin != "" {
+		if acceptNewCertificate {
+			return nil, errors.New("--relay-cert-pin and --accept-new-relay-certificate cannot be combined")
+		}
+		return &relayCertificateTrust{pin: pin, logger: logger}, nil
+	}
+	if knownRelaysPath == "" {
+		return nil, errors.New("known relays file path is empty")
+	}
+	store, err := knownrelay.Open(knownRelaysPath)
+	if err != nil {
+		return nil, err
+	}
+	return &relayCertificateTrust{
+		store:                store,
+		acceptNewCertificate: acceptNewCertificate,
+		logger:               logger,
+	}, nil
+}
+
+func (trust *relayCertificateTrust) tlsConfig(relayURL *url.URL, defaultPort string) (*tls.Config, error) {
+	if trust.pin != "" {
+		return transport.ClientTLSConfig(relayURL.Hostname(), trust.pin)
+	}
+	endpoint, err := canonicalRelayEndpoint(relayURL, defaultPort)
+	if err != nil {
+		return nil, err
+	}
+	return transport.ClientTLSConfigWithLeafVerifier(relayURL.Hostname(), func(certificateDER []byte) error {
+		trust.mu.Lock()
+		defer trust.mu.Unlock()
+		acceptReplacement := trust.acceptNewCertificate
+		result, err := trust.store.Verify(endpoint, certificateDER, acceptReplacement)
+		if err != nil {
+			var changed *knownrelay.CertificateChangedError
+			if errors.As(err, &changed) {
+				return fmt.Errorf("%w; verify the relay identity, then rerun with --accept-new-relay-certificate", err)
+			}
+			return err
+		}
+		trust.acceptNewCertificate = false
+		if trust.logger != nil {
+			switch result.Decision {
+			case knownrelay.Learned:
+				trust.logger.Info("trusted relay certificate on first use", "endpoint", endpoint, "certificate_pin", result.Pin, "known_relays_file", trust.store.Path())
+			case knownrelay.Replaced:
+				trust.logger.Warn("replaced trusted relay certificate after explicit approval", "endpoint", endpoint, "previous_certificate_pin", result.PreviousPin, "certificate_pin", result.Pin, "known_relays_file", trust.store.Path())
+			case knownrelay.Known:
+				if acceptReplacement {
+					trust.logger.Info("relay certificate is unchanged; explicit replacement approval was not needed", "endpoint", endpoint, "certificate_pin", result.Pin)
+				}
+			}
+		}
+		return nil
+	}), nil
+}
+
+func canonicalRelayEndpoint(relayURL *url.URL, defaultPort string) (string, error) {
+	host := strings.ToLower(strings.TrimSuffix(relayURL.Hostname(), "."))
+	if host == "" {
+		return "", errors.New("relay URL has no host")
+	}
+	port := relayURL.Port()
+	if port == "" {
+		port = defaultPort
+	}
+	if port == "" {
+		return "", errors.New("relay URL has no port and no default port")
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 func tlsHTTPClient(tlsConfig *tls.Config) *http.Client {

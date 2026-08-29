@@ -239,8 +239,9 @@ ariadne-mcp \
 настраиваются независимо.
 
 Для прямого подключения удалённых нод relay может слушать QUIC/UDP и WSS/TCP
-на одном номере порта. Для self-signed сертификата connector проверяет точный
-SHA-256 pin; это публичная identity relay, а не bootstrap-секрет:
+на одном номере порта. Connector доверяет TLS-сертификату по модели TOFU,
+аналогичной SSH `StrictHostKeyChecking=accept-new`: при первом подключении
+запоминает отпечаток для `host:port`, а затем требует точного совпадения:
 
 ```bash
 ./bin/ariadne-relay \
@@ -253,16 +254,32 @@ SHA-256 pin; это публичная identity relay, а не bootstrap-сек�
 
 ./bin/ariadne-connector \
   --relay quic://relay.example:47471 \
-  --relay-cert-pin sha256:HEX_DIGEST \
   --alias workstation
 ```
 
-Relay печатает pin node-сертификата при запуске. При сертификате от публичной
-CA `--relay-cert-pin` можно опустить. Для автоматического fallback нужно
-пробросить на relay и UDP, и TCP `47471`; connector сначала использует QUIC, а
-через четыре секунды пробует `https://relay.example:47471/v1/connect`. Fallback
-можно отключить флагом `--relay-fallback none` или заменить отдельным URL.
-Management plane через роутер не публикуется.
+Trust store находится в `~/.config/ariadne/known_relays` и создаётся с правами
+`0600`. QUIC и WSS на одном `host:port` используют одну запись. Если relay
+предъявил другой сертификат, connector блокирует соединение и печатает старый и
+новый отпечатки. После независимой проверки новой identity пользователь может
+явно принять ровно одну замену:
+
+```bash
+./bin/ariadne-connector \
+  --relay quic://relay.example:47471 \
+  --accept-new-relay-certificate \
+  --alias workstation
+```
+
+Как и у SSH TOFU, самое первое подключение уязвимо для активного MITM. Для
+unattended provisioning с заранее известной identity сохранён
+`--relay-cert-pin sha256:HEX_DIGEST`; при его наличии trust store не
+используется. Путь store можно изменить через `--known-relays-file`.
+
+Для автоматического fallback нужно пробросить на relay и UDP, и TCP `47471`;
+connector сначала использует QUIC, а через четыре секунды пробует
+`https://relay.example:47471/v1/connect`. Fallback можно отключить флагом
+`--relay-fallback none` или заменить отдельным URL. Management plane через
+роутер не публикуется.
 Дополнительный `--node-loopback-listen` сохраняет plaintext endpoint только на
 loopback для режима `--relay-ssh`; наружу он не доступен.
 

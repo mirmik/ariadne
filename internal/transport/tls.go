@@ -31,6 +31,17 @@ func FormatCertificatePin(certificateDER []byte) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
+func NormalizeCertificatePin(value string) (string, error) {
+	pin, err := ParseCertificatePin(value)
+	if err != nil {
+		return "", err
+	}
+	if len(pin) == 0 {
+		return "", errors.New("certificate pin is empty")
+	}
+	return "sha256:" + hex.EncodeToString(pin), nil
+}
+
 func ClientTLSConfig(serverName, pinValue string) (*tls.Config, error) {
 	pin, err := ParseCertificatePin(pinValue)
 	if err != nil {
@@ -43,16 +54,26 @@ func ClientTLSConfig(serverName, pinValue string) (*tls.Config, error) {
 	if len(pin) == 0 {
 		return config, nil
 	}
-	config.InsecureSkipVerify = true // Exact certificate pinning below replaces Web PKI verification.
+	return ClientTLSConfigWithLeafVerifier(serverName, func(certificateDER []byte) error {
+		digest := sha256.Sum256(certificateDER)
+		if subtle.ConstantTimeCompare(digest[:], pin) != 1 {
+			return fmt.Errorf("relay TLS certificate pin mismatch: received %s", FormatCertificatePin(certificateDER))
+		}
+		return nil
+	}), nil
+}
+
+func ClientTLSConfigWithLeafVerifier(serverName string, verify func([]byte) error) *tls.Config {
+	config := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		ServerName:         serverName,
+		InsecureSkipVerify: true, // The caller-supplied leaf verifier replaces Web PKI verification.
+	}
 	config.VerifyConnection = func(state tls.ConnectionState) error {
 		if len(state.PeerCertificates) == 0 {
 			return errors.New("relay did not present a TLS certificate")
 		}
-		digest := sha256.Sum256(state.PeerCertificates[0].Raw)
-		if subtle.ConstantTimeCompare(digest[:], pin) != 1 {
-			return fmt.Errorf("relay TLS certificate pin mismatch: received %s", FormatCertificatePin(state.PeerCertificates[0].Raw))
-		}
-		return nil
+		return verify(state.PeerCertificates[0].Raw)
 	}
-	return config, nil
+	return config
 }
