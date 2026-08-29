@@ -116,6 +116,19 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 		t.Fatalf("unexpected exec result: %#v", result)
 	}
 
+	commandContext, cancelCommand := context.WithTimeout(context.Background(), 2*time.Second)
+	commandResult, err := apiClient.Exec(commandContext, "phone", wire.ExecRequest{
+		Command:       "printf 'hello from shell' | tr a-z A-Z",
+		TimeoutMillis: 1000,
+	})
+	cancelCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commandResult.ExitCode != 0 || commandResult.Shell != "sh" || string(commandResult.Stdout) != "sh\x00-lc\x00printf 'hello from shell' | tr a-z A-Z" {
+		t.Fatalf("unexpected shell command result: %#v", commandResult)
+	}
+
 	streamContext, cancelStream := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancelStream()
 	stream, err := apiClient.DialStream(streamContext, "phone", "ssh")

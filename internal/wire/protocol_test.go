@@ -3,12 +3,11 @@ package wire
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
 func TestEnvelopeRoundTrip(t *testing.T) {
-	original := ExecRequest{Argv: []string{"uname", "-a"}, Cwd: "/tmp", TimeoutMillis: 5000}
+	original := ExecRequest{Command: "uname -a | sed -n '1p'", Shell: "posix", Cwd: "/tmp", TimeoutMillis: 5000}
 	encoded, err := MarshalEnvelope(MessageExecRequest, "request-1", original)
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +23,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal([]byte(strings.Join(decoded.Argv, "\x00")), []byte(strings.Join(original.Argv, "\x00"))) || decoded.Cwd != original.Cwd || decoded.TimeoutMillis != original.TimeoutMillis {
+	if decoded.Command != original.Command || decoded.Shell != original.Shell || decoded.Cwd != original.Cwd || decoded.TimeoutMillis != original.TimeoutMillis {
 		t.Fatalf("payload changed during round trip: %#v", decoded)
 	}
 }

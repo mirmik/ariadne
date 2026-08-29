@@ -107,13 +107,14 @@ open_stream(target=node_id, protocol=ssh|exec|file|mcp)
 
 Для автоматических заданий полезен структурированный exec-протокол:
 
-- `argv`, а не shell-строка по умолчанию;
+- shell-строка по умолчанию для удобства агента, с явной семантикой выбранного shell;
+- отдельный `argv`-режим для точного запуска без shell;
 - `cwd` и ограниченный `env`;
 - отдельные stdin/stdout/stderr;
 - timeout и cancellation;
 - session/job ID;
 - лимит вывода и artifacts для больших результатов;
-- отдельный опасный режим `shell(script)`.
+- отдельный интерактивный raw shell.
 
 Собственную криптографию или «почти SSH» разрабатывать не стоит: использовать SSH либо стандартный TLS/mTLS с проверенной протокольной библиотекой.
 
@@ -142,13 +143,13 @@ MCP лучше держать централизованно рядом с relay
 ```text
 machines.list
 machines.status
-machines.exec(target, argv, cwd, timeout)
+machines.exec(target, command, shell, cwd, timeout)
 machines.process_start/read/write/kill
 machines.files_list/get/put
 machines.shell
 ```
 
-`machines.exec(command: string)` сам по себе был бы SSH в JSON-обёртке. Польза MCP — в схемах, структурированных результатах, scopes, target identity, аудите и approvals.
+Строковый `command` выбран основным агентским интерфейсом: модели естественно создают консольные команды, пайпы и перенаправления. MCP при этом сохраняет схемы, структурированные результаты, scopes, target identity, аудит и approvals; точный `argv` остаётся доступен там, где shell-интерпретация нежелательна.
 
 MCP является northbound API для модели. Relay/connector образуют southbound data plane и отвечают за мобильное соединение, reconnect и маршрутизацию.
 

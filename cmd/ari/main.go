@@ -14,6 +14,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/cliargs"
 	"github.com/mirmik/ariadne/internal/client"
+	"github.com/mirmik/ariadne/internal/execspec"
 	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/sshtunnel"
 	"github.com/mirmik/ariadne/internal/transport"
@@ -154,15 +155,30 @@ func runExec(ctx context.Context, apiClient *client.Client, arguments []string) 
 	flags.SetOutput(os.Stderr)
 	cwd := flags.String("cwd", "", "working directory on the node")
 	timeout := flags.Duration("timeout", 30*time.Second, "command timeout")
+	var command string
+	flags.StringVar(&command, "command", "", "command line interpreted by the remote platform shell")
+	flags.StringVar(&command, "c", "", "shorthand for --command")
+	shell := flags.String("shell", "", "shell for --command: auto, posix, powershell, or cmd")
 	if err := flags.Parse(arguments); err != nil {
 		return 1, err
 	}
 	rest := flags.Args()
-	if len(rest) >= 2 && rest[1] == "--" {
-		rest = append(rest[:1], rest[2:]...)
+	request := wire.ExecRequest{Command: command, Shell: *shell, Cwd: *cwd}
+	if command != "" {
+		if len(rest) != 1 {
+			return 1, errors.New("usage: ari exec [OPTIONS] --command STRING TARGET")
+		}
+	} else {
+		if len(rest) >= 2 && rest[1] == "--" {
+			rest = append(rest[:1], rest[2:]...)
+		}
+		if len(rest) < 2 {
+			return 1, errors.New("usage: ari exec [OPTIONS] TARGET -- EXECUTABLE [ARG...]")
+		}
+		request.Argv = append([]string(nil), rest[1:]...)
 	}
-	if len(rest) < 2 {
-		return 1, errors.New("usage: ari exec [--cwd DIR] [--timeout DURATION] TARGET -- COMMAND [ARG...]")
+	if err := execspec.Validate(request); err != nil {
+		return 1, err
 	}
 	if *timeout < time.Millisecond {
 		return 1, errors.New("timeout must be at least 1ms")
@@ -173,11 +189,8 @@ func runExec(ctx context.Context, apiClient *client.Client, arguments []string) 
 	}
 	requestContext, cancel := context.WithTimeout(ctx, *timeout+clientGrace)
 	defer cancel()
-	result, err := apiClient.Exec(requestContext, rest[0], wire.ExecRequest{
-		Argv:          rest[1:],
-		Cwd:           *cwd,
-		TimeoutMillis: timeout.Milliseconds(),
-	})
+	request.TimeoutMillis = timeout.Milliseconds()
+	result, err := apiClient.Exec(requestContext, rest[0], request)
 	if err != nil {
 		return 1, err
 	}
@@ -233,7 +246,8 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, `Usage:
   ari [global flags] nodes
   ari [global flags] claim NODE_ID ALIAS
-  ari [global flags] exec [--cwd DIR] [--timeout DURATION] TARGET -- COMMAND [ARG...]
+  ari [global flags] exec [OPTIONS] --command STRING TARGET
+  ari [global flags] exec [OPTIONS] TARGET -- EXECUTABLE [ARG...]
   ari [global flags] shell TARGET
   ari [global flags] proxy TARGET
 

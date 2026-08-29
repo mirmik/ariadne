@@ -60,17 +60,26 @@ SSH host key стабильно выводится из seed node identity че�
 
 ## Exec
 
-HTTP request преобразуется relay в `exec.request`:
+Management HTTP/MCP request принимает высокоуровневую форму:
 
 ```json
 {
-  "argv": ["uname", "-a"],
-  "cwd": "/tmp",
-  "timeout_ms": 30000
+	"command": "uname -a | sed -n '1p'",
+	"shell": "auto",
+	"cwd": "/tmp",
+	"timeout_ms": 30000
 }
 ```
 
-Connector запускает `argv` напрямую и отвечает `exec.result` с exit code, раздельными stdout/stderr, duration и признаками timeout/truncation. `exec.cancel` отменяет процесс, если HTTP client исчез или истёк relay timeout.
+`command` является основным агентским форматом. `auto` выбирает PowerShell на Windows и POSIX shell на остальных поддерживаемых платформах; явно доступны `posix`, `powershell` и `cmd`. Relay преобразует строку в точный shell `argv` перед отправкой connector, поэтому этот режим совместим с ранее выпущенными connector. На Android системный `/system/bin/sh` служит только trampoline до Termux `sh`: сама команда передаётся отдельным аргументом, без повторного строкового экранирования. Ответ `exec.result` содержит фактически выбранный shell.
+
+Для запуска без shell вместо `command` передаётся `argv`; эти поля взаимоисключающие:
+
+```json
+{"argv": ["uname", "-a"], "timeout_ms": 30000}
+```
+
+Connector всегда запускает полученный `argv` напрямую и отвечает exit code, раздельными stdout/stderr, duration и признаками timeout/truncation. `exec.cancel` отменяет процесс, если HTTP client исчез или истёк relay timeout.
 
 stdout и stderr являются byte strings и кодируются стандартным JSON base64, поэтому бинарный вывод не повреждается.
 

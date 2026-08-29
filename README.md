@@ -23,7 +23,7 @@ ari shell / ari exec
  ariadne-connector ── PTY ── shell того же OS-пользователя
 ```
 
-`ari shell` поднимает SSH непосредственно внутри одного Ariadne stream: локальный TCP listener не создаётся. CLI генерирует одноразовый Ed25519-ключ в памяти, connector принимает его только для этого потока, а CLI проверяет host key, привязанный к подписанной node identity. Relay переносит непрозрачные SSH-байты в мультиплексированных stream-кадрах. Структурированный `exec` идёт отдельными control-сообщениями и запускает `argv` напрямую, без shell-строки.
+`ari shell` поднимает SSH непосредственно внутри одного Ariadne stream: локальный TCP listener не создаётся. CLI генерирует одноразовый Ed25519-ключ в памяти, connector принимает его только для этого потока, а CLI проверяет host key, привязанный к подписанной node identity. Relay переносит непрозрачные SSH-байты в мультиплексированных stream-кадрах. Неинтерактивный `exec` принимает удобную командную строку для нативного shell узла; точный `argv` без shell сохранён как низкоуровневая альтернатива.
 
 `ari proxy` сохранён как совместимый низкоуровневый путь для обычного OpenSSH. Только этот режим требует локальный `sshd` и его штатные user keys/`authorized_keys`.
 
@@ -116,6 +116,7 @@ task build:android
 ```bash
 ./bin/ari nodes
 ./bin/ari claim NODE_ID phone
+./bin/ari exec --command 'uname -a | sed -n "1p"' phone
 ./bin/ari exec phone -- uname -a
 ./bin/ari exec --timeout 5s --cwd /tmp phone -- pwd
 ./bin/ari shell phone
@@ -127,9 +128,9 @@ task build:android
 
 - `ariadne_nodes` — живые ноды, platform и статус доверенного alias;
 - `ariadne_claim` — привязка alias к точному `node_id`;
-- `ariadne_exec` — прямой `argv`, remote `cwd`, timeout и структурированные stdout/stderr/exit code.
+- `ariadne_exec` — командная строка через нативный shell узла, опциональный точный `argv`, remote `cwd`, timeout и структурированные stdout/stderr/exit code.
 
-MCP запускается рядом с relay, читает тот же локальный management token и не передаёт его connector. Интерактивный shell не включён в MCP: stdio занят протоколом, а агентские операции должны использовать structured exec.
+MCP запускается рядом с relay, читает тот же локальный management token и не передаёт его connector. Интерактивный shell не включён в MCP: stdio занят протоколом, а агентские операции используют завершённые exec-запросы. Для обычной работы агент передаёт `command`; `argv` нужен только для точного запуска без интерпретации shell.
 
 Для Codex соберите MCP, установите user-wide skill и зарегистрируйте сервер одной командой:
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/mirmik/ariadne/internal/execspec"
 	"github.com/mirmik/ariadne/internal/identity"
 	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/messageconn"
@@ -253,23 +254,24 @@ func (server *Server) handleExec(response http.ResponseWriter, request *http.Req
 		writeAPIError(response, http.StatusBadRequest, "invalid exec request: unexpected data after JSON value")
 		return
 	}
-	if len(execRequest.Argv) == 0 || execRequest.Argv[0] == "" {
-		writeAPIError(response, http.StatusBadRequest, "argv must contain a non-empty executable")
+	preparedRequest, usedShell, err := execspec.Prepare(execRequest, session.nodeInfo().Platform)
+	if err != nil {
+		writeAPIError(response, http.StatusBadRequest, err.Error())
 		return
 	}
-	if execRequest.TimeoutMillis < 0 || execRequest.TimeoutMillis > server.config.MaxExecTimeout.Milliseconds() {
+	if preparedRequest.TimeoutMillis < 0 || preparedRequest.TimeoutMillis > server.config.MaxExecTimeout.Milliseconds() {
 		writeAPIError(response, http.StatusBadRequest, fmt.Sprintf("timeout must be non-negative and not exceed %s", server.config.MaxExecTimeout))
 		return
 	}
 	timeout := server.config.DefaultExecTimeout
-	if execRequest.TimeoutMillis > 0 {
-		timeout = time.Duration(execRequest.TimeoutMillis) * time.Millisecond
+	if preparedRequest.TimeoutMillis > 0 {
+		timeout = time.Duration(preparedRequest.TimeoutMillis) * time.Millisecond
 	}
-	execRequest.TimeoutMillis = timeout.Milliseconds()
+	preparedRequest.TimeoutMillis = timeout.Milliseconds()
 
 	requestContext, cancel := context.WithTimeout(request.Context(), timeout+server.config.ExecResultGrace)
 	defer cancel()
-	result, err := session.exec(requestContext, execRequest)
+	result, err := session.exec(requestContext, preparedRequest)
 	if err != nil {
 		status := http.StatusBadGateway
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -278,6 +280,7 @@ func (server *Server) handleExec(response http.ResponseWriter, request *http.Req
 		writeAPIError(response, status, err.Error())
 		return
 	}
+	result.Shell = usedShell
 	writeJSON(response, http.StatusOK, result)
 }
 

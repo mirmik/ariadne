@@ -91,13 +91,16 @@ type ClaimRequest struct {
 }
 
 type ExecRequest struct {
-	Argv          []string `json:"argv"`
+	Command       string   `json:"command,omitempty"`
+	Argv          []string `json:"argv,omitempty"`
+	Shell         string   `json:"shell,omitempty"`
 	Cwd           string   `json:"cwd,omitempty"`
 	TimeoutMillis int64    `json:"timeout_ms,omitempty"`
 }
 
 type ExecResult struct {
 	ExitCode        int    `json:"exit_code"`
+	Shell           string `json:"shell,omitempty"`
 	Stdout          []byte `json:"stdout,omitempty"`
 	Stderr          []byte `json:"stderr,omitempty"`
 	Error           string `json:"error,omitempty"`

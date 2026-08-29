@@ -118,13 +118,47 @@ func TestExecToolForwardsArgvAndPreservesCommandFailure(t *testing.T) {
 	}
 }
 
+func TestExecToolPrefersCommandAndForwardsShellSelection(t *testing.T) {
+	api := &fakeAPI{execResult: wire.ExecResult{
+		ExitCode:       0,
+		Shell:          "powershell.exe",
+		Stdout:         []byte("built"),
+		DurationMillis: 50,
+	}}
+	session := connectTestClient(t, api)
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ariadne_exec",
+		Arguments: map[string]any{
+			"target":  "radio",
+			"command": "task build; git status --short",
+			"shell":   "auto",
+			"cwd":     `C:\Users\rfmeas\project\termin`,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("command execution returned a tool error: %#v", result.Content)
+	}
+	var output ExecOutput
+	decodeStructuredOutput(t, result.StructuredContent, &output)
+	if !output.OK || output.Shell != "powershell.exe" || output.Stdout != "built" {
+		t.Fatalf("unexpected exec output: %#v", output)
+	}
+	if api.execRequest.Command != "task build; git status --short" || api.execRequest.Shell != "auto" || len(api.execRequest.Argv) != 0 {
+		t.Fatalf("command request was not preserved: %#v", api.execRequest)
+	}
+}
+
 func TestExecToolReportsValidationAndTransportErrorsAsToolErrors(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		api  *fakeAPI
 		args map[string]any
 	}{
-		{name: "invalid input", api: &fakeAPI{}, args: map[string]any{"target": "radio", "argv": []string{}}},
+		{name: "missing command", api: &fakeAPI{}, args: map[string]any{"target": "radio"}},
+		{name: "ambiguous input", api: &fakeAPI{}, args: map[string]any{"target": "radio", "command": "pwd", "argv": []string{"pwd"}}},
 		{name: "relay failure", api: &fakeAPI{execErr: errors.New("relay unavailable")}, args: map[string]any{"target": "radio", "argv": []string{"echo"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/mirmik/ariadne/internal/execspec"
 	"github.com/mirmik/ariadne/internal/wire"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -49,7 +50,9 @@ type ClaimOutput struct {
 
 type ExecInput struct {
 	Target        string   `json:"target" jsonschema:"claimed alias or exact node ID"`
-	Argv          []string `json:"argv" jsonschema:"executable followed by exact arguments; shell operators are not interpreted"`
+	Command       string   `json:"command,omitempty" jsonschema:"preferred: command line interpreted by the remote platform shell"`
+	Argv          []string `json:"argv,omitempty" jsonschema:"advanced alternative: executable followed by exact arguments, without shell interpretation"`
+	Shell         string   `json:"shell,omitempty" jsonschema:"shell for command: auto (default), posix, powershell, or cmd"`
 	Cwd           string   `json:"cwd,omitempty" jsonschema:"working directory on the remote node"`
 	TimeoutMillis int64    `json:"timeout_ms,omitempty" jsonschema:"remote command timeout in milliseconds; defaults to 30000 and must not exceed 600000"`
 }
@@ -57,6 +60,7 @@ type ExecInput struct {
 type ExecOutput struct {
 	OK              bool   `json:"ok"`
 	ExitCode        int    `json:"exit_code"`
+	Shell           string `json:"shell,omitempty"`
 	Stdout          string `json:"stdout,omitempty"`
 	Stderr          string `json:"stderr,omitempty"`
 	Error           string `json:"error,omitempty"`
@@ -73,7 +77,7 @@ type handlers struct {
 func New(api API, version string) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "ariadne", Version: version},
-		&mcp.ServerOptions{Instructions: "Use ariadne_nodes before choosing a target. ariadne_exec runs argv directly: shell operators are not interpreted, so prefer cwd and exact arguments. Use a platform shell explicitly only when shell syntax is required. Treat ariadne_exec as remote code execution with the connected user's permissions; preserve the user's authorization boundaries and inspect before mutating."},
+		&mcp.ServerOptions{Instructions: "Use ariadne_nodes before choosing a target. Prefer ariadne_exec command for normal agent work: it supports the remote platform's shell syntax, including pipelines, redirects, expansion, and command chaining. Use cwd instead of embedding cd when practical. Use argv only when exact no-shell argument boundaries matter. Treat ariadne_exec as remote code execution with the connected user's permissions; preserve the user's authorization boundaries and inspect before mutating."},
 	)
 	h := &handlers{api: api}
 	mcp.AddTool(server, &mcp.Tool{
@@ -91,7 +95,7 @@ func New(api API, version string) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ariadne_exec",
 		Title:       "Execute command on Ariadne node",
-		Description: "Execute an argv vector on a connected node with an optional working directory and timeout. Returns structured stdout, stderr, exit status, duration, timeout, and truncation flags. This may modify the remote machine.",
+		Description: "Execute a command string through the connected node's native shell (PowerShell on Windows, POSIX shell elsewhere), or optionally execute an exact argv vector without a shell. Returns the selected shell and structured stdout, stderr, exit status, duration, timeout, and truncation flags. This may modify the remote machine.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, IdempotentHint: false, OpenWorldHint: boolPointer(true), DestructiveHint: boolPointer(true)},
 	}, h.exec)
 	return server
@@ -124,8 +128,14 @@ func (h *handlers) exec(ctx context.Context, _ *mcp.CallToolRequest, input ExecI
 	if input.Target == "" {
 		return nil, ExecOutput{}, errors.New("target is required")
 	}
-	if len(input.Argv) == 0 || input.Argv[0] == "" {
-		return nil, ExecOutput{}, errors.New("argv must contain a non-empty executable")
+	execRequest := wire.ExecRequest{
+		Command: input.Command,
+		Argv:    append([]string(nil), input.Argv...),
+		Shell:   input.Shell,
+		Cwd:     input.Cwd,
+	}
+	if err := execspec.Validate(execRequest); err != nil {
+		return nil, ExecOutput{}, err
 	}
 	timeout := time.Duration(input.TimeoutMillis) * time.Millisecond
 	if input.TimeoutMillis == 0 {
@@ -136,17 +146,15 @@ func (h *handlers) exec(ctx context.Context, _ *mcp.CallToolRequest, input ExecI
 	}
 	requestContext, cancel := context.WithTimeout(ctx, timeout+clientGrace)
 	defer cancel()
-	result, err := h.api.Exec(requestContext, input.Target, wire.ExecRequest{
-		Argv:          append([]string(nil), input.Argv...),
-		Cwd:           input.Cwd,
-		TimeoutMillis: timeout.Milliseconds(),
-	})
+	execRequest.TimeoutMillis = timeout.Milliseconds()
+	result, err := h.api.Exec(requestContext, input.Target, execRequest)
 	if err != nil {
 		return nil, ExecOutput{}, err
 	}
 	output := ExecOutput{
 		OK:              result.Error == "" && result.ExitCode == 0,
 		ExitCode:        result.ExitCode,
+		Shell:           result.Shell,
 		Stdout:          string(result.Stdout),
 		Stderr:          string(result.Stderr),
 		Error:           result.Error,
