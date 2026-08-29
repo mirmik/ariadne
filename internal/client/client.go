@@ -111,6 +111,23 @@ func (client *Client) Claim(ctx context.Context, nodeID, alias string) (wire.Nod
 	return node, nil
 }
 
+func (client *Client) Revoke(ctx context.Context, nodeID string) error {
+	if nodeID == "" {
+		return errors.New("node ID is required")
+	}
+	path := "/v1/nodes/" + url.PathEscape(nodeID) + "/revoke"
+	request, err := client.request(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("revoke node identity: %w", err)
+	}
+	defer response.Body.Close()
+	return decodeHTTPError(response)
+}
+
 func (client *Client) Exec(ctx context.Context, target string, execRequest wire.ExecRequest) (wire.ExecResult, error) {
 	if target == "" {
 		return wire.ExecResult{}, errors.New("target is required")

@@ -1,9 +1,12 @@
 package relay
 
 import (
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/mirmik/ariadne/internal/noderegistry"
 	"github.com/mirmik/ariadne/internal/wire"
 )
 
@@ -26,14 +29,17 @@ func TestNodeSessionRejectsUnsolicitedMessages(t *testing.T) {
 }
 
 func TestReportedAliasesRequireManagementClaim(t *testing.T) {
-	server := New(DefaultConfig(), nil)
+	server, err := New(DefaultConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer server.cancel()
 	first := &nodeSession{info: wire.NodeInfo{ID: "node-one", Alias: "phone"}}
 	second := &nodeSession{info: wire.NodeInfo{ID: "node-two", Alias: "PHONE"}}
-	if _, err := server.register(first); err != nil {
+	if _, err := server.register(first, "public-key-one"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.register(second); err != nil {
+	if _, err := server.register(second, "public-key-two"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,13 +64,62 @@ func TestReportedAliasesRequireManagementClaim(t *testing.T) {
 func TestAnonymousNodeCapacity(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxOnlineNodes = 1
-	server := New(config, nil)
-	defer server.cancel()
-	if _, err := server.register(&nodeSession{info: wire.NodeInfo{ID: "node-one", Alias: "one"}}); err != nil {
+	server, err := New(config, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.register(&nodeSession{info: wire.NodeInfo{ID: "node-two", Alias: "two"}}); err == nil {
+	defer server.cancel()
+	if _, err := server.register(&nodeSession{info: wire.NodeInfo{ID: "node-one", Alias: "one"}}, "public-key-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.register(&nodeSession{info: wire.NodeInfo{ID: "node-two", Alias: "two"}}, "public-key-two"); err == nil {
 		t.Fatal("relay accepted an anonymous node above its capacity")
+	}
+}
+
+func TestPersistentClaimsSurviveRelayRestartAndPreventTakeover(t *testing.T) {
+	config := DefaultConfig()
+	config.RegistryPath = filepath.Join(t.TempDir(), "node-registry.json")
+	firstServer, err := New(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &nodeSession{info: wire.NodeInfo{ID: "node-one", Alias: "temporary", Platform: "linux"}}
+	if _, err := firstServer.register(first, "public-key-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstServer.claim("node-one", "phone"); err != nil {
+		t.Fatal(err)
+	}
+	firstServer.cancel()
+
+	secondServer, err := New(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondServer.cancel()
+	reconnected := &nodeSession{info: wire.NodeInfo{ID: "node-one", Alias: "new-report", Platform: "linux"}}
+	if _, err := secondServer.register(reconnected, "public-key-one"); err != nil {
+		t.Fatal(err)
+	}
+	if info := reconnected.nodeInfo(); !info.AliasClaimed || info.Alias != "phone" {
+		t.Fatalf("claim was not restored after restart: %#v", info)
+	}
+	other := &nodeSession{info: wire.NodeInfo{ID: "node-two", Alias: "phone", Platform: "linux"}}
+	if _, err := secondServer.register(other, "public-key-two"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondServer.claim("node-two", "PHONE"); err == nil {
+		t.Fatal("offline persistent alias was taken over")
+	}
+	secondServer.mu.Lock()
+	delete(secondServer.byID, "node-one")
+	secondServer.mu.Unlock()
+	if err := secondServer.revoke("node-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondServer.register(&nodeSession{info: wire.NodeInfo{ID: "node-one", Alias: "phone"}}, "public-key-one"); !errors.Is(err, noderegistry.ErrRevoked) {
+		t.Fatalf("revoked identity reconnect error=%v", err)
 	}
 }
 

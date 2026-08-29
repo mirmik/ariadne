@@ -47,6 +47,9 @@ func TestJobManagerCancelsRunningJob(t *testing.T) {
 	if job.State != "canceled" {
 		t.Fatalf("unexpected canceled job: %#v", job)
 	}
+	if repeated := manager.Handle(context.Background(), wire.JobRequest{Action: wire.JobActionCancel, JobID: response.Job.ID}); repeated.Error != "" {
+		t.Fatalf("repeated cancel was not idempotent: %#v", repeated)
+	}
 }
 
 func TestJobManagerEnforcesRetentionAndCompletedJobLimit(t *testing.T) {

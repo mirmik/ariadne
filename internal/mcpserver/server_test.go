@@ -12,32 +12,34 @@ import (
 )
 
 type fakeAPI struct {
-	nodes       []wire.NodeInfo
-	nodesErr    error
-	claimedNode wire.NodeInfo
-	claimErr    error
-	execResult  wire.ExecResult
-	execErr     error
-	claimID     string
-	claimAlias  string
-	execTarget  string
-	execRequest wire.ExecRequest
-	fileResult  wire.FileTransferResult
-	fileErr     error
-	fileTarget  string
-	localPath   string
-	remotePath  string
-	overwrite   bool
-	job         wire.JobInfo
-	jobs        []wire.JobInfo
-	jobOutput   wire.JobOutput
-	jobErr      error
-	jobTarget   string
-	jobID       string
-	jobRequest  wire.ExecRequest
-	stdoutOff   int64
-	stderrOff   int64
-	readLimit   int
+	nodes        []wire.NodeInfo
+	nodesErr     error
+	claimedNode  wire.NodeInfo
+	claimErr     error
+	execResult   wire.ExecResult
+	execErr      error
+	claimID      string
+	claimAlias   string
+	revokeTarget string
+	revokeErr    error
+	execTarget   string
+	execRequest  wire.ExecRequest
+	fileResult   wire.FileTransferResult
+	fileErr      error
+	fileTarget   string
+	localPath    string
+	remotePath   string
+	overwrite    bool
+	job          wire.JobInfo
+	jobs         []wire.JobInfo
+	jobOutput    wire.JobOutput
+	jobErr       error
+	jobTarget    string
+	jobID        string
+	jobRequest   wire.ExecRequest
+	stdoutOff    int64
+	stderrOff    int64
+	readLimit    int
 }
 
 func (api *fakeAPI) Nodes(context.Context) ([]wire.NodeInfo, error) {
@@ -48,6 +50,11 @@ func (api *fakeAPI) Claim(_ context.Context, nodeID, alias string) (wire.NodeInf
 	api.claimID = nodeID
 	api.claimAlias = alias
 	return api.claimedNode, api.claimErr
+}
+
+func (api *fakeAPI) Revoke(_ context.Context, target string) error {
+	api.revokeTarget = target
+	return api.revokeErr
 }
 
 func (api *fakeAPI) Exec(_ context.Context, target string, request wire.ExecRequest) (wire.ExecResult, error) {
@@ -135,6 +142,20 @@ func TestClaimToolForwardsExactIdentityAndAlias(t *testing.T) {
 	}
 	if result.IsError || api.claimID != "n_test" || api.claimAlias != "radio" {
 		t.Fatalf("claim was not forwarded correctly: result=%#v id=%q alias=%q", result, api.claimID, api.claimAlias)
+	}
+}
+
+func TestRevokeToolForwardsTarget(t *testing.T) {
+	api := &fakeAPI{}
+	session := connectTestClient(t, api)
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "ariadne_revoke", Arguments: map[string]any{"node_id": "n_test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || api.revokeTarget != "n_test" {
+		t.Fatalf("revoke was not forwarded: result=%#v target=%q", result, api.revokeTarget)
 	}
 }
 
@@ -299,8 +320,8 @@ func TestToolAnnotationsDescribeMutationRisk(t *testing.T) {
 		}
 		tools[tool.Name] = tool
 	}
-	if len(tools) != 11 {
-		t.Fatalf("got %d tools, want 11", len(tools))
+	if len(tools) != 12 {
+		t.Fatalf("got %d tools, want 12", len(tools))
 	}
 	if !tools["ariadne_nodes"].Annotations.ReadOnlyHint {
 		t.Fatal("ariadne_nodes is not marked read-only")
@@ -310,6 +331,9 @@ func TestToolAnnotationsDescribeMutationRisk(t *testing.T) {
 	}
 	if tools["ariadne_file_upload"].Annotations.DestructiveHint == nil || !*tools["ariadne_file_upload"].Annotations.DestructiveHint {
 		t.Fatal("ariadne_file_upload does not advertise its mutation risk")
+	}
+	if tools["ariadne_revoke"].Annotations.DestructiveHint == nil || !*tools["ariadne_revoke"].Annotations.DestructiveHint {
+		t.Fatal("ariadne_revoke does not advertise its mutation risk")
 	}
 	if !tools["ariadne_job_read"].Annotations.ReadOnlyHint || tools["ariadne_job_cancel"].Annotations.DestructiveHint == nil || !*tools["ariadne_job_cancel"].Annotations.DestructiveHint {
 		t.Fatal("job tool annotations do not describe their risk")

@@ -15,6 +15,7 @@ Management plane по умолчанию слушает `127.0.0.1:8088`, тре
 
 - `GET /v1/nodes` — список online-узлов;
 - `POST /v1/nodes/{node_id}/claim` — назначение доверенного alias с management plane;
+- `POST /v1/nodes/{node_id}/revoke` — отзыв точной identity и освобождение alias;
 - `POST /v1/nodes/{target}/exec` — структурированный exec;
 - `POST /v1/nodes/{target}/jobs` и `GET /v1/nodes/{target}/jobs` — запуск и список фоновых задач;
 - `GET /v1/nodes/{target}/jobs/{job_id}` — состояние задачи;
@@ -28,7 +29,7 @@ Node plane не требует предварительно доставленн
 
 Для прямого доступа роутер может пробросить UDP и TCP одного внешнего порта на `47471`: connector принимает короткий `--relay HOST` как `quic://HOST:47471`, предпочитает QUIC и затем использует WSS fallback. `HOST:PORT` меняет порт, а полный URL явно выбирает transport. TLS identity relay проверяется по TOFU: первый сертификат для `host:port` сохраняется в пользовательском `known_relays`, последующие подключения требуют точного совпадения. Изменившийся сертификат блокируется; одноразовая замена требует `--accept-new-relay-certificate`. Для заранее подготовленной установки TOFU можно заменить точным публичным pin из `--relay-cert-pin`. Старый bootstrap через `ariadne-connector --relay-ssh breakglass@HOST[:PORT]` создаёт SSH local forward до relay `127.0.0.1:47471` и остаётся доступен как fallback для сетей без UDP. Management client `ari` обычно работает рядом с relay или через защищённый tunnel и должен иметь token-файл. Plaintext non-loopback listener требует явный insecure-флаг.
 
-Переданный connector alias является недоверенной подсказкой. В списке узлов он имеет `alias_claimed: false` и не участвует в lookup. Management plane может связать alias с точным `node_id` через `/claim`; только такой alias разрешено использовать как target. Claims сохраняются после reconnect той же identity, но в v1 теряются при перезапуске relay.
+Переданный connector alias является недоверенной подсказкой. В списке узлов он имеет `alias_claimed: false` и не участвует в lookup. Management plane может связать alias с точным `node_id` через `/claim`; только такой alias разрешено использовать как target. Identity, platform metadata, claim и revoke-state сохраняются relay в постоянном registry, а live presence остаётся в памяти. Поэтому тот же ключ восстанавливает alias после reconnect или перезапуска relay, а другой ключ не может занять alias offline-узла. `/revoke` закрывает живую сессию, освобождает alias и запрещает прежнему ключу регистрироваться снова.
 
 ## Регистрация connector
 
@@ -83,7 +84,7 @@ Management HTTP/MCP request принимает высокоуровневую ф
 {"argv": ["uname", "-a"], "timeout_ms": 30000}
 ```
 
-Connector всегда запускает полученный `argv` напрямую и отвечает exit code, раздельными stdout/stderr, duration и признаками timeout/truncation. `exec.cancel` отменяет процесс, если HTTP client исчез или истёк relay timeout.
+Connector всегда запускает полученный `argv` напрямую и отвечает exit code, раздельными stdout/stderr, duration и признаками timeout/truncation. `exec.cancel` отменяет процесс, если HTTP client исчез или истёк relay timeout. На Linux, Android/Termux и других Unix connector создаёт отдельную process group и убивает всю группу; на Windows запускает новую process group и использует системный `taskkill /T /F` с direct-child fallback. Та же примитива применяется к отмене и timeout фоновых jobs, поэтому дочерние компиляторы и shell-процессы не остаются сиротами.
 
 stdout и stderr являются byte strings и кодируются стандартным JSON base64, поэтому бинарный вывод не повреждается.
 

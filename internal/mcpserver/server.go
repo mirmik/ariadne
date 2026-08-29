@@ -23,6 +23,7 @@ const (
 type API interface {
 	Nodes(context.Context) ([]wire.NodeInfo, error)
 	Claim(context.Context, string, string) (wire.NodeInfo, error)
+	Revoke(context.Context, string) error
 	Exec(context.Context, string, wire.ExecRequest) (wire.ExecResult, error)
 	UploadFile(context.Context, string, string, string, bool) (wire.FileTransferResult, error)
 	DownloadFile(context.Context, string, string, string, bool) (wire.FileTransferResult, error)
@@ -59,6 +60,14 @@ type ClaimInput struct {
 
 type ClaimOutput struct {
 	Node Node `json:"node"`
+}
+
+type RevokeInput struct {
+	NodeID string `json:"node_id" jsonschema:"exact stable node ID returned by ariadne_nodes"`
+}
+
+type RevokeOutput struct {
+	OK bool `json:"ok"`
 }
 
 type ExecInput struct {
@@ -196,6 +205,12 @@ func New(api API, version string) *mcp.Server {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, IdempotentHint: true, OpenWorldHint: boolPointer(false), DestructiveHint: boolPointer(false)},
 	}, h.claim)
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "ariadne_revoke",
+		Title:       "Revoke Ariadne node identity",
+		Description: "Permanently reject an exact enrolled node identity and release its claimed alias. This disconnects the node immediately and requires a new connector identity to reconnect.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, IdempotentHint: true, OpenWorldHint: boolPointer(false), DestructiveHint: boolPointer(true)},
+	}, h.revoke)
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ariadne_exec",
 		Title:       "Execute command on Ariadne node",
 		Description: "Execute a command string through the connected node's native shell (PowerShell on Windows, POSIX shell elsewhere), or optionally execute an exact argv vector without a shell. Returns the selected shell and structured stdout, stderr, exit status, duration, timeout, and truncation flags. This may modify the remote machine.",
@@ -243,6 +258,16 @@ func (h *handlers) claim(ctx context.Context, _ *mcp.CallToolRequest, input Clai
 		return nil, ClaimOutput{}, err
 	}
 	return nil, ClaimOutput{Node: nodeOutput(node)}, nil
+}
+
+func (h *handlers) revoke(ctx context.Context, _ *mcp.CallToolRequest, input RevokeInput) (*mcp.CallToolResult, RevokeOutput, error) {
+	if input.NodeID == "" {
+		return nil, RevokeOutput{}, errors.New("node_id is required")
+	}
+	if err := h.api.Revoke(ctx, input.NodeID); err != nil {
+		return nil, RevokeOutput{}, err
+	}
+	return nil, RevokeOutput{OK: true}, nil
 }
 
 func (h *handlers) exec(ctx context.Context, _ *mcp.CallToolRequest, input ExecInput) (*mcp.CallToolResult, ExecOutput, error) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mirmik/ariadne/internal/managementauth"
+	"github.com/mirmik/ariadne/internal/noderegistry"
 	"github.com/mirmik/ariadne/internal/quictransport"
 	"github.com/mirmik/ariadne/internal/relay"
 	"github.com/mirmik/ariadne/internal/transport"
@@ -32,6 +33,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defaultRegistryPath, err := noderegistry.DefaultPath()
+	if err != nil {
+		return err
+	}
 	flags := flag.NewFlagSet("ariadne-relay", flag.ContinueOnError)
 	managementListen := flags.String("management-listen", "127.0.0.1:8088", "loopback-only management HTTP listen address")
 	managementTLSCertificate := flags.String("management-tls-cert", "", "management-plane TLS certificate path")
@@ -43,6 +48,7 @@ func run() error {
 	nodeTLSKey := flags.String("node-tls-key", "", "node-plane TLS private key path")
 	allowInsecureManagementListen := flags.Bool("allow-insecure-management-listen", false, "allow plaintext management HTTP on a trusted non-loopback network")
 	managementTokenPath := flags.String("management-token-file", defaultManagementTokenPath, "management bearer token file (created with mode 0600 if absent)")
+	registryPath := flags.String("registry-file", defaultRegistryPath, "persistent node identity and alias registry file")
 	allowInsecureNodeListen := flags.Bool("allow-insecure-node-listen", false, "allow plaintext node plane on a non-loopback address")
 	verbose := flags.Bool("verbose", false, "enable debug logs")
 	showVersion := flags.Bool("version", false, "print version and exit")
@@ -108,7 +114,11 @@ func run() error {
 	relayConfig := relay.DefaultConfig()
 	relayConfig.Version = version
 	relayConfig.ManagementToken = managementToken
-	relayServer := relay.New(relayConfig, logger)
+	relayConfig.RegistryPath = *registryPath
+	relayServer, err := relay.New(relayConfig, logger)
+	if err != nil {
+		return err
+	}
 	defer relayServer.Close()
 	signalContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

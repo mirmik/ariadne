@@ -28,8 +28,8 @@ type nodeSession struct {
 
 	writeMu sync.Mutex
 
-	pendingMu sync.Mutex
-	pending   map[string]chan wire.ExecResult
+	pendingMu   sync.Mutex
+	pending     map[string]chan wire.ExecResult
 	pendingJobs map[string]chan wire.JobResponse
 
 	streamsMu sync.RWMutex
@@ -52,14 +52,14 @@ func (session *nodeSession) setClaimedAlias(alias string) {
 
 func newNodeSession(server *Server, connection messageconn.Conn, info wire.NodeInfo) *nodeSession {
 	return &nodeSession{
-		server:  server,
-		conn:    connection,
-		info:    info,
-		done:    make(chan struct{}),
-		pending: make(map[string]chan wire.ExecResult),
+		server:      server,
+		conn:        connection,
+		info:        info,
+		done:        make(chan struct{}),
+		pending:     make(map[string]chan wire.ExecResult),
 		pendingJobs: make(map[string]chan wire.JobResponse),
-		streams: make(map[string]*relayStream),
-		known:   make(map[string]struct{}),
+		streams:     make(map[string]*relayStream),
+		known:       make(map[string]struct{}),
 	}
 }
 

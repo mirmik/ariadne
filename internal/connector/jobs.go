@@ -148,6 +148,7 @@ func (manager *jobManager) start(lifecycle context.Context, request wire.ExecReq
 		jobContext, cancel = context.WithCancel(lifecycle)
 	}
 	command := exec.CommandContext(jobContext, request.Argv[0], request.Argv[1:]...)
+	configureProcessTree(command)
 	command.Dir = request.Cwd
 	command.Stdout = stdout
 	command.Stderr = stderr
@@ -257,6 +258,9 @@ func (job *backgroundJob) running() bool {
 func (job *backgroundJob) cancelJob() error {
 	job.mu.Lock()
 	defer job.mu.Unlock()
+	if job.cancelRequested || job.info.State == "canceled" {
+		return nil
+	}
 	if job.info.State != "running" {
 		return errors.New("job is not running")
 	}

@@ -39,9 +39,11 @@ func (executor LocalExecutor) Execute(ctx context.Context, request wire.ExecRequ
 	stdout := newCappedBuffer(maxOutputBytes)
 	stderr := newCappedBuffer(maxOutputBytes)
 	command := exec.CommandContext(ctx, request.Argv[0], request.Argv[1:]...)
+	configureProcessTree(command)
 	command.Dir = request.Cwd
 	command.Stdout = stdout
 	command.Stderr = stderr
+	command.WaitDelay = 5 * time.Second
 	if executor.Environment != nil {
 		command.Env = append([]string(nil), executor.Environment...)
 	}

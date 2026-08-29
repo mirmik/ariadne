@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/mirmik/ariadne/internal/identity"
 	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/messageconn"
+	"github.com/mirmik/ariadne/internal/noderegistry"
 	"github.com/mirmik/ariadne/internal/wire"
 	"golang.org/x/crypto/ssh"
 )
@@ -39,6 +41,7 @@ type Config struct {
 	MaxPendingHandshakes int
 	MaxOnlineNodes       int
 	ManagementToken      string
+	RegistryPath         string
 }
 
 func DefaultConfig() Config {
@@ -68,9 +71,10 @@ type Server struct {
 	byID           map[string]*nodeSession
 	claimsByID     map[string]string
 	claimedByAlias map[string]string
+	registry       *noderegistry.Store
 }
 
-func New(config Config, logger *slog.Logger) *Server {
+func New(config Config, logger *slog.Logger) (*Server, error) {
 	defaults := DefaultConfig()
 	if config.Version == "" {
 		config.Version = "dev"
@@ -113,6 +117,15 @@ func New(config Config, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	registry, err := noderegistry.Open(config.RegistryPath)
+	if err != nil {
+		return nil, fmt.Errorf("open node registry: %w", err)
+	}
+	claimsByID := registry.Claims()
+	claimedByAlias := make(map[string]string, len(claimsByID))
+	for nodeID, alias := range claimsByID {
+		claimedByAlias[strings.ToLower(alias)] = nodeID
+	}
 	serverContext, cancel := context.WithCancel(context.Background())
 	return &Server{
 		config:         config,
@@ -121,9 +134,10 @@ func New(config Config, logger *slog.Logger) *Server {
 		cancel:         cancel,
 		handshakes:     make(chan struct{}, config.MaxPendingHandshakes),
 		byID:           make(map[string]*nodeSession),
-		claimsByID:     make(map[string]string),
-		claimedByAlias: make(map[string]string),
-	}
+		claimsByID:     claimsByID,
+		claimedByAlias: claimedByAlias,
+		registry:       registry,
+	}, nil
 }
 
 // NodeHandler exposes only the connector-facing, reactive node plane.
@@ -198,6 +212,10 @@ func (server *Server) handleNodeAction(response http.ResponseWriter, request *ht
 		server.handleClaim(response, request, target)
 		return
 	}
+	if request.Method == http.MethodPost && action == "revoke" {
+		server.handleRevoke(response, target)
+		return
+	}
 	session := server.lookup(target)
 	if session == nil {
 		writeAPIError(response, http.StatusNotFound, "node is not online")
@@ -222,6 +240,18 @@ func (server *Server) handleNodeAction(response http.ResponseWriter, request *ht
 	default:
 		writeAPIError(response, http.StatusNotFound, "unknown node endpoint")
 	}
+}
+
+func (server *Server) handleRevoke(response http.ResponseWriter, target string) {
+	if err := server.revoke(target); err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writeAPIError(response, status, err.Error())
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (server *Server) handleClaim(response http.ResponseWriter, request *http.Request, nodeID string) {
@@ -374,7 +404,7 @@ func (server *Server) serveConnector(connection messageconn.Conn, handshakeSlotH
 		ConnectedAt:      time.Now().UTC(),
 		Online:           true,
 	})
-	replaced, err := server.register(session)
+	replaced, err := server.register(session, hello.PublicKey)
 	if err != nil {
 		server.writeProtocolError(connection, "capacity", err.Error())
 		return
@@ -409,7 +439,7 @@ func (server *Server) lookup(target string) *nodeSession {
 	return nil
 }
 
-func (server *Server) register(session *nodeSession) (*nodeSession, error) {
+func (server *Server) register(session *nodeSession, publicKey string) (*nodeSession, error) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	info := session.nodeInfo()
@@ -417,7 +447,19 @@ func (server *Server) register(session *nodeSession) (*nodeSession, error) {
 	if replaced == nil && len(server.byID) >= server.config.MaxOnlineNodes {
 		return nil, errors.New("relay is at online node capacity")
 	}
-	if alias := server.claimsByID[info.ID]; alias != "" {
+	record, err := server.registry.Observe(noderegistry.Observation{
+		NodeID:           info.ID,
+		PublicKey:        publicKey,
+		ReportedAlias:    info.Alias,
+		SSHHostKey:       info.SSHHostKey,
+		Platform:         info.Platform,
+		Architecture:     info.Architecture,
+		ConnectorVersion: info.ConnectorVersion,
+	}, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if alias := record.ClaimedAlias; alias != "" {
 		session.setClaimedAlias(alias)
 	}
 	server.byID[info.ID] = session
@@ -441,17 +483,38 @@ func (server *Server) claim(nodeID, alias string) (wire.NodeInfo, error) {
 	if session == nil {
 		return wire.NodeInfo{}, errNodeNotOnline
 	}
-	aliasKey := strings.ToLower(alias)
-	if owner := server.claimedByAlias[aliasKey]; owner != "" && owner != nodeID {
-		return wire.NodeInfo{}, fmt.Errorf("alias %q is already claimed by another node", alias)
+	record, err := server.registry.Claim(nodeID, alias, time.Now().UTC())
+	if err != nil {
+		return wire.NodeInfo{}, err
 	}
+	aliasKey := strings.ToLower(record.ClaimedAlias)
 	if previous := server.claimsByID[nodeID]; previous != "" {
 		delete(server.claimedByAlias, strings.ToLower(previous))
 	}
-	server.claimsByID[nodeID] = alias
+	server.claimsByID[nodeID] = record.ClaimedAlias
 	server.claimedByAlias[aliasKey] = nodeID
-	session.setClaimedAlias(alias)
+	session.setClaimedAlias(record.ClaimedAlias)
 	return session.nodeInfo(), nil
+}
+
+func (server *Server) revoke(target string) error {
+	server.mu.Lock()
+	record, err := server.registry.Revoke(target, time.Now().UTC())
+	if err != nil {
+		server.mu.Unlock()
+		return err
+	}
+	if alias := server.claimsByID[record.NodeID]; alias != "" {
+		delete(server.claimedByAlias, strings.ToLower(alias))
+	}
+	delete(server.claimsByID, record.NodeID)
+	session := server.byID[record.NodeID]
+	delete(server.byID, record.NodeID)
+	server.mu.Unlock()
+	if session != nil {
+		session.close(errors.New("node identity was revoked"))
+	}
+	return nil
 }
 
 func readAndValidateHello(ctx context.Context, connection messageconn.Conn) (wire.Hello, ed25519.PublicKey, error) {

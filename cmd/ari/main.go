@@ -88,6 +88,8 @@ func run(arguments []string) int {
 		err = runNodes(runContext, apiClient, commandArguments)
 	case "claim":
 		err = runClaim(runContext, apiClient, commandArguments)
+	case "revoke":
+		err = runRevoke(runContext, apiClient, commandArguments)
 	case "exec":
 		var exitCode int
 		exitCode, err = runExec(runContext, apiClient, commandArguments)
@@ -321,6 +323,17 @@ func runClaim(ctx context.Context, apiClient *client.Client, arguments []string)
 	return nil
 }
 
+func runRevoke(ctx context.Context, apiClient *client.Client, arguments []string) error {
+	if len(arguments) != 1 {
+		return errors.New("usage: ari revoke NODE_ID")
+	}
+	if err := apiClient.Revoke(ctx, arguments[0]); err != nil {
+		return err
+	}
+	fmt.Printf("revoked %s\n", arguments[0])
+	return nil
+}
+
 func runExec(ctx context.Context, apiClient *client.Client, arguments []string) (int, error) {
 	flags := flag.NewFlagSet("ari exec", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -417,6 +430,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, `Usage:
   ari [global flags] nodes
   ari [global flags] claim NODE_ID ALIAS
+  ari [global flags] revoke NODE_ID
   ari [global flags] exec [OPTIONS] --command STRING TARGET
   ari [global flags] exec [OPTIONS] TARGET -- EXECUTABLE [ARG...]
   ari [global flags] upload [OPTIONS] TARGET LOCAL_PATH REMOTE_PATH

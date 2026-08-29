@@ -121,6 +121,7 @@ task build:android
 ```bash
 ./bin/ari nodes
 ./bin/ari claim NODE_ID phone
+./bin/ari revoke NODE_ID
 ./bin/ari exec --command 'uname -a | sed -n "1p"' phone
 ./bin/ari exec phone -- uname -a
 ./bin/ari exec --timeout 5s --cwd /tmp phone -- pwd
@@ -138,6 +139,7 @@ task build:android
 
 - `ariadne_nodes` — живые ноды, platform и статус доверенного alias;
 - `ariadne_claim` — привязка alias к точному `node_id`;
+- `ariadne_revoke` — немедленный отзыв identity и освобождение alias;
 - `ariadne_exec` — командная строка через нативный shell узла, опциональный точный `argv`, remote `cwd`, timeout и структурированные stdout/stderr/exit code.
 - `ariadne_file_upload` / `ariadne_file_download` — path-to-path streaming между MCP host и узлом без передачи file bytes через контекст модели.
 - `ariadne_job_start/list/status/read/cancel/remove` — connector-owned фоновые задачи с ограниченным spool и курсорным чтением stdout/stderr.
@@ -172,7 +174,9 @@ management HTTP и WebSocket запросов. Путь с обеих сторо
 `--management-token-file`. Этот token никогда не передаётся connector и не
 участвует в bootstrap node identity.
 
-Alias, сообщённый новым connector, отображается в `ari nodes` с суффиксом `?` и не используется как target. Управляющая сторона должна один раз выполнить `ari claim NODE_ID ALIAS`; claim сохраняется в памяти relay, применяется после reconnect и делает alias доступным для `shell`/`exec`. Постоянное хранение claims пока не реализовано.
+Alias, сообщённый новым connector, отображается в `ari nodes` с суффиксом `?` и не используется как target. Управляющая сторона должна один раз выполнить `ari claim NODE_ID ALIAS`; claim записывается в постоянный registry relay, применяется после reconnect и перезапуска relay и делает alias доступным для `shell`/`exec`. `ari revoke NODE_ID` немедленно отключает точную identity, запрещает ей повторную регистрацию и освобождает alias.
+
+По умолчанию registry находится в `$XDG_CONFIG_HOME/ariadne/node-registry.json` (обычно `~/.config/ariadne/node-registry.json`); путь меняется флагом relay `--registry-file`. Это versioned JSON schema v1 с файлом `0600`. Каждая транзакция сначала сохраняет предыдущее целое состояние в `.bak`, затем атомарно заменяет основной файл. Если основной файл отсутствует, relay автоматически восстанавливает последнюю резервную копию. Повреждённый файл или неизвестная версия schema приводят к fail-closed запуску: следует остановить relay, сохранить оба файла для разбора и явно восстановить проверенный `.bak`. Отсутствующий registry создаётся автоматически; прежние in-memory claims перенести невозможно, их нужно подтвердить один раз после обновления.
 
 ## Zero-config shell
 
@@ -311,18 +315,17 @@ ari --relay-ssh breakglass@relay-host shell phone
 
 Обе программы используют системный OpenSSH и выбирают свободный loopback-порт. Ручной `ssh -L` также поддерживается.
 
-У connector нет bootstrap bearer token. Публичный node plane принимает новые self-authenticated Ed25519 identities, но не содержит управляющих endpoints. QUIC использует TLS 1.3, ALPN `ariadne/1`, отключённый 0-RTT и keepalive; при разрыве connector переподключается с той же identity. Отдельный management bearer token защищает `nodes`, `claim`, `exec` и stream endpoints даже на loopback. Management plane по умолчанию разрешено привязать только к loopback. Флаги `--allow-insecure-management-listen`, `--allow-insecure-node-listen` и `--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
+У connector нет bootstrap bearer token. Публичный node plane принимает новые self-authenticated Ed25519 identities, но не содержит управляющих endpoints. QUIC использует TLS 1.3, ALPN `ariadne/1`, отключённый 0-RTT и keepalive; при разрыве connector переподключается с той же identity. Отдельный management bearer token защищает `nodes`, `claim`, `revoke`, `exec` и stream endpoints даже на loopback. Management plane по умолчанию разрешено привязать только к loopback. Флаги `--allow-insecure-management-listen`, `--allow-insecure-node-listen` и `--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
 
 ## Текущие ограничения
 
-- неизвестные node identities допускаются без enrollment; registry и доверенные aliases пока не сохраняются;
-- registry хранится в памяти, а offline nodes/jobs пока отсутствуют;
+- неизвестные node identities допускаются без предварительного enrollment; первое доверие alias всё ещё требует management claim;
+- identity и aliases сохраняются, но presence и connector-owned jobs остаются только в памяти соответствующих процессов;
 - одна relay-инстанция без распределённого presence;
 - нет namespace, ACL, approvals, внутренней CA и mTLS;
 - `exec` не является sandbox: команда получает права OS-пользователя connector;
 - connector, `exec` и встроенный shell пока разделяют один OS UID;
-- неподтверждённые aliases являются только метаданными и не используются для lookup; claim пока хранится только в памяти;
-- relay проверяет подписанную регистрацию и сообщает CLI привязанный SSH host key, но постоянный registry и claim-модель aliases ещё не реализованы;
+- неподтверждённые aliases являются только метаданными и не используются для lookup;
 - terminal I/O не записывается, SSH-содержимое relay не расшифровывает.
 
 Исходный архитектурный набросок находится в [docs/architecture.md](docs/architecture.md), текущий wire-протокол — в [docs/protocol.md](docs/protocol.md).

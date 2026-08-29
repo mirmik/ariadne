@@ -18,3 +18,4 @@ Use the Ariadne MCP tools directly. Do not invoke the `ari` CLI unless the user 
 9. Ariadne MCP is non-interactive. If the task genuinely requires interactive terminal control, stdin to a background process, durable execution across connector restarts, or another missing primitive, stop and identify the Ariadne capability to add instead of working around it through an unrelated access path.
 
 Use `ariadne_claim` only with an exact `node_id` returned by `ariadne_nodes` and a user-approved alias.
+Use `ariadne_revoke` only with an exact `node_id` returned by `ariadne_nodes` and explicit user authorization for that identity: revoke disconnects it, permanently rejects the same key, and releases its alias for reuse.

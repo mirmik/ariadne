@@ -40,7 +40,10 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	relayConfig.PingInterval = 20 * time.Millisecond
 	relayConfig.PingTimeout = time.Second
 	relayConfig.ManagementToken = testManagementToken
-	relayServer := relay.New(relayConfig, logger)
+	relayServer, err := relay.New(relayConfig, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer relayServer.Close()
 	nodeServer := startHTTPTestServer(t, relayServer.NodeHandler())
 	defer nodeServer.Close()
@@ -268,13 +271,27 @@ func TestRelayConnectorExecAndSSHStream(t *testing.T) {
 	if stdout.String() != "plain-stdout" || stderr.String() != "plain-stderr" {
 		t.Fatalf("non-PTY streams changed: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
+
+	if err := apiClient.Revoke(context.Background(), node.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForNoNodes(t, apiClient)
+	reconnectContext, cancelReconnect := context.WithTimeout(context.Background(), 2*time.Second)
+	reconnectErr := nodeConnector.RunOnce(reconnectContext)
+	cancelReconnect()
+	if reconnectErr == nil || !strings.Contains(reconnectErr.Error(), "revoked") {
+		t.Fatalf("revoked node reconnected: %v", reconnectErr)
+	}
 }
 
 func TestRelayConnectorExecAndStreamOverQUIC(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	relayConfig := relay.DefaultConfig()
 	relayConfig.ManagementToken = testManagementToken
-	relayServer := relay.New(relayConfig, logger)
+	relayServer, err := relay.New(relayConfig, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer relayServer.Close()
 	managementServer := startHTTPTestServer(t, relayServer.ManagementHandler())
 	defer managementServer.Close()
@@ -376,7 +393,10 @@ func TestQUICConnectorReconnectsAfterTransportRestart(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	relayConfig := relay.DefaultConfig()
 	relayConfig.ManagementToken = testManagementToken
-	relayServer := relay.New(relayConfig, logger)
+	relayServer, err := relay.New(relayConfig, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	managementServer := startHTTPTestServer(t, relayServer.ManagementHandler())
 
 	certificatePath, keyPath, certificateDER := quicTestCertificate(t)
