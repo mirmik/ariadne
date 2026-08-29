@@ -55,3 +55,27 @@ func TestResolveConnectorAliasReportsHostnameFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePersistentArguments(t *testing.T) {
+	if err := validatePersistentArguments([]string{"--relay", "relay.example", "--alias", "radio room", "--max-exec-timeout", "5m"}); err != nil {
+		t.Fatalf("valid arguments rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		contains  string
+	}{
+		{name: "unknown flag", arguments: []string{"--typo"}, contains: "flag provided"},
+		{name: "positional", arguments: []string{"relay.example"}, contains: "unexpected"},
+		{name: "missing relay", arguments: []string{"--alias", "radio"}, contains: "require --relay"},
+		{name: "version", arguments: []string{"--version"}, contains: "cannot be saved"},
+		{name: "persistent trust override", arguments: []string{"--accept-new-relay-certificate"}, contains: "one-time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validatePersistentArguments(test.arguments)
+			if err == nil || !strings.Contains(err.Error(), test.contains) {
+				t.Fatalf("expected error containing %q, got %v", test.contains, err)
+			}
+		})
+	}
+}

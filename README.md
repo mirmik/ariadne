@@ -114,6 +114,42 @@ task build:android
 имени; management plane всё равно должен один раз подтвердить alias через
 `ari claim`.
 
+### Автозапуск connector
+
+Connector умеет установить себя в постоянный пользовательский каталог и
+зарегистрировать автозапуск без запроса или сохранения пароля:
+
+```bash
+ariadne-connector autostart install --relay 95.165.81.109
+ariadne-connector autostart status
+ariadne-connector autostart uninstall
+```
+
+Аргументы после `install` сохраняются как отдельный массив, без повторного
+разбора shell-командной строки. При первой установке `--relay` (или
+`--relay-ssh`) обязателен; повторный `autostart install` без параметров сохраняет
+прежнюю конфигурацию и только обновляет бинарник. Скачанный бинарник можно удалить: installer
+копирует его под content-addressed именем, поэтому повторный `install` новой
+версией безопасно переключает следующий запуск на обновление. Identity и TOFU
+store остаются в обычном пользовательском config-каталоге и при обновлении не
+пересоздаются. Одноразовый `--accept-new-relay-certificate` сохранять в
+автозапуск запрещено.
+
+На Windows создаётся задача `Ariadne Connector` с logon type
+`InteractiveToken`, обычными правами текущего пользователя и без credentials.
+На Linux создаётся и включается user unit
+`~/.config/systemd/user/ariadne-connector.service`. Оба варианта начинают
+действовать при следующем входе пользователя; `install` намеренно не запускает
+второй connector рядом с уже работающим вручную экземпляром. Windows-логи
+пишутся в `%LOCALAPPDATA%\Ariadne\logs\connector.log`, Linux-логи доступны через
+`journalctl --user -u ariadne-connector`.
+
+Android-сборка в Termux создаёт скрипт
+`~/.termux/boot/20-ariadne-connector`. Для его выполнения нужно установить
+Termux:Boot, один раз открыть приложение и исключить Termux из нежелательных
+ограничений фоновой работы. Постоянный wake lock автоматически не включается.
+Termux-логи находятся в `~/.cache/ariadne/connector.log`.
+
 `--ssh-address` влияет только на опциональный `ari proxy`; для `ari shell` этот адрес не используется, поэтому флаг можно не указывать.
 
 Проверка registry и структурированного exec:

@@ -5,13 +5,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/mirmik/ariadne/internal/autostart"
 	"github.com/mirmik/ariadne/internal/cliargs"
 	"github.com/mirmik/ariadne/internal/connector"
 	"github.com/mirmik/ariadne/internal/identity"
@@ -30,6 +33,14 @@ func main() {
 }
 
 func run() error {
+	arguments := cliargs.Current()
+	if len(arguments) > 0 && arguments[0] == "autostart" {
+		return runAutostart(arguments[1:])
+	}
+	return runConnector(arguments)
+}
+
+func runConnector(arguments []string) error {
 	defaultIdentityPath, err := identity.DefaultPath()
 	if err != nil {
 		return err
@@ -64,7 +75,7 @@ func run() error {
 	verbose := flags.Bool("verbose", false, "enable debug logs")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	flags.Usage = func() { printConnectorUsage(flags) }
-	if err := flags.Parse(cliargs.Current()); err != nil {
+	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -196,6 +207,170 @@ func run() error {
 	}
 }
 
+func runAutostart(arguments []string) error {
+	if len(arguments) == 0 {
+		printAutostartUsage(os.Stderr)
+		return errors.New("autostart command is required")
+	}
+	switch arguments[0] {
+	case "install":
+		connectorArguments := arguments[1:]
+		if len(connectorArguments) == 0 {
+			existing, err := autostart.Load()
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return errors.New("first autostart install requires --relay HOST (or --relay-ssh USER@HOST)")
+				}
+				return err
+			}
+			connectorArguments = existing.Arguments
+		}
+		if err := validatePersistentArguments(connectorArguments); err != nil {
+			return err
+		}
+		result, err := autostart.Install(connectorArguments)
+		if err != nil {
+			return err
+		}
+		printAutostartResult("installed", result)
+		return nil
+	case "status":
+		if len(arguments) != 1 {
+			return errors.New("autostart status does not accept arguments")
+		}
+		result, err := autostart.Status()
+		if err != nil {
+			return err
+		}
+		printAutostartResult("status", result)
+		return nil
+	case "uninstall":
+		if len(arguments) != 1 {
+			return errors.New("autostart uninstall does not accept arguments")
+		}
+		result, err := autostart.Uninstall()
+		if err != nil {
+			return err
+		}
+		printAutostartResult("uninstalled", result)
+		return nil
+	case "run":
+		if len(arguments) != 1 {
+			return errors.New("autostart run does not accept arguments")
+		}
+		config, err := autostart.Load()
+		if err != nil {
+			return err
+		}
+		if config.LogFile != "" {
+			if err := redirectAutostartLogs(config.LogFile); err != nil {
+				return err
+			}
+		}
+		return runConnector(config.Arguments)
+	case "help", "-h", "--help":
+		printAutostartUsage(os.Stdout)
+		return nil
+	default:
+		return fmt.Errorf("unknown autostart command %q", arguments[0])
+	}
+}
+
+func validatePersistentArguments(arguments []string) error {
+	flags := flag.NewFlagSet("ariadne-connector autostart install", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	relay := flags.String("relay", "", "")
+	relaySSH := flags.String("relay-ssh", "", "")
+	flags.String("relay-cert-pin", "", "")
+	flags.String("known-relays-file", "", "")
+	acceptChangedCertificate := flags.Bool("accept-new-relay-certificate", false, "")
+	flags.String("relay-fallback", "", "")
+	flags.String("alias", "", "")
+	flags.String("identity", "", "")
+	flags.String("ssh-address", "", "")
+	flags.String("shell", "", "")
+	flags.Bool("allow-insecure-relay", false, "")
+	flags.Int("max-concurrent-exec", 0, "")
+	flags.Duration("max-exec-timeout", 0, "")
+	flags.Int("max-output", 0, "")
+	flags.Int64("max-file-size", 0, "")
+	flags.Int("max-streams", 0, "")
+	flags.Int("max-concurrent-jobs", 0, "")
+	flags.Int64("max-job-output", 0, "")
+	flags.Int("max-retained-jobs", 0, "")
+	flags.Duration("max-job-timeout", 0, "")
+	flags.Duration("job-retention", 0, "")
+	flags.Bool("verbose", false, "")
+	showVersion := flags.Bool("version", false, "")
+	if err := flags.Parse(arguments); err != nil {
+		return fmt.Errorf("invalid saved connector options: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected saved connector arguments: %v", flags.Args())
+	}
+	if *showVersion {
+		return errors.New("--version cannot be saved as an autostart connector option")
+	}
+	if *acceptChangedCertificate {
+		return errors.New("--accept-new-relay-certificate is a one-time trust override and cannot be saved in autostart")
+	}
+	if *relay == "" && *relaySSH == "" {
+		return errors.New("saved connector options require --relay HOST or --relay-ssh USER@HOST")
+	}
+	return nil
+}
+
+func printAutostartResult(action string, result autostart.Result) {
+	fmt.Printf("autostart %s: %s\n", action, result.Mechanism)
+	if result.Location != "" {
+		fmt.Printf("location: %s\n", result.Location)
+	}
+	if result.Details != "" {
+		fmt.Printf("%s\n", result.Details)
+	}
+	if result.Warning != "" {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", result.Warning)
+	}
+}
+
+func printAutostartUsage(output *os.File) {
+	fmt.Fprintln(output, `Usage:
+  ariadne-connector autostart install [connector options]
+  ariadne-connector autostart status
+  ariadne-connector autostart uninstall
+
+install copies this binary to a stable per-user location and registers it to
+start without a password when the user logs in. Connector options following
+install are stored verbatim. The first install requires an explicit relay; a
+later install without options reuses the saved options. For example:
+
+  ariadne-connector autostart install --relay relay.example
+  ariadne-connector autostart install --relay relay.example --alias workstation
+
+Backends are Task Scheduler with an interactive token on Windows, a user
+systemd unit on Linux, and a Termux:Boot script on Android/Termux. Installation
+does not start a second connector immediately; it takes effect at the next
+login or boot.`)
+}
+
+func redirectAutostartLogs(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create autostart log directory: %w", err)
+	}
+	if info, err := os.Stat(path); err == nil && info.Size() > 4<<20 {
+		_ = os.Remove(path + ".1")
+		_ = os.Rename(path, path+".1")
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open autostart log: %w", err)
+	}
+	os.Stdout = file
+	os.Stderr = file
+	fmt.Fprintf(file, "\n%s ariadne-connector autostart run\n", time.Now().Format(time.RFC3339))
+	return nil
+}
+
 func resolveConnectorAlias(explicit string, hostname func() (string, error)) (string, bool, error) {
 	if explicit != "" {
 		return explicit, false, nil
@@ -241,6 +416,8 @@ func printConnectorUsage(flags *flag.FlagSet) {
 	fmt.Fprintln(output, `Usage:
   ariadne-connector --relay HOST [options]
   ariadne-connector --relay-ssh USER@HOST[:PORT] [options]
+  ariadne-connector autostart install [connector options]
+  ariadne-connector autostart status|uninstall
 
 Ariadne connector keeps an outgoing node connection to the relay and exposes
 shell, structured exec, file transfer, and connector-owned background jobs
