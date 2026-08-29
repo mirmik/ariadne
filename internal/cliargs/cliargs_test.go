@@ -7,10 +7,12 @@ import (
 
 func TestFromArgv(t *testing.T) {
 	tests := []struct {
-		name string
-		goos string
-		argv []string
-		want []string
+		name          string
+		goos          string
+		workingDir    string
+		termuxSelfExe string
+		argv          []string
+		want          []string
 	}{
 		{
 			name: "ordinary command line",
@@ -19,16 +21,42 @@ func TestFromArgv(t *testing.T) {
 			want: []string{"--alias", "phone"},
 		},
 		{
-			name: "duplicated Android program name",
-			goos: "android",
-			argv: []string{"/data/data/com.termux/files/home/ariadne-connector", "/data/data/com.termux/files/home/ariadne-connector", "--alias", "phone"},
-			want: []string{"--alias", "phone"},
+			name:          "Termux linker argument",
+			goos:          "android",
+			workingDir:    "/data/data/com.termux/files/home",
+			termuxSelfExe: "./ariadne-connector",
+			argv:          []string{"./ariadne-connector", "/data/data/com.termux/files/home/ariadne-connector", "--alias", "phone"},
+			want:          []string{"--alias", "phone"},
 		},
 		{
-			name: "same first argument is retained outside Android",
-			goos: "linux",
-			argv: []string{"ari", "ari", "nodes"},
-			want: []string{"ari", "nodes"},
+			name:          "absolute Termux linker argument",
+			goos:          "android",
+			workingDir:    "/data/data/com.termux/files/home",
+			termuxSelfExe: "/data/data/com.termux/files/home/ariadne-connector",
+			argv:          []string{"/data/data/com.termux/files/home/ariadne-connector", "/data/data/com.termux/files/home/ariadne-connector", "--help"},
+			want:          []string{"--help"},
+		},
+		{
+			name:          "Termux marker is ignored outside Android",
+			goos:          "linux",
+			workingDir:    "/tmp",
+			termuxSelfExe: "ari",
+			argv:          []string{"ari", "ari", "nodes"},
+			want:          []string{"ari", "nodes"},
+		},
+		{
+			name: "first real Android argument is preserved without Termux marker",
+			goos: "android",
+			argv: []string{"ariadne-connector", "ariadne-connector", "--help"},
+			want: []string{"ariadne-connector", "--help"},
+		},
+		{
+			name:          "unrelated first argument is preserved",
+			goos:          "android",
+			workingDir:    "/data/data/com.termux/files/home",
+			termuxSelfExe: "/data/data/com.termux/files/home/ariadne-connector",
+			argv:          []string{"ariadne-connector", "radio", "--help"},
+			want:          []string{"radio", "--help"},
 		},
 		{
 			name: "program name only",
@@ -40,8 +68,8 @@ func TestFromArgv(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := FromArgv(test.goos, test.argv); !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("FromArgv(%q, %#v) = %#v, want %#v", test.goos, test.argv, got, test.want)
+			if got := FromArgv(test.goos, test.workingDir, test.termuxSelfExe, test.argv); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("FromArgv(%q, %q, %q, %#v) = %#v, want %#v", test.goos, test.workingDir, test.termuxSelfExe, test.argv, got, test.want)
 			}
 		})
 	}

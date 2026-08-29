@@ -38,7 +38,8 @@ func run() error {
 		return err
 	}
 	flags := flag.NewFlagSet("ariadne-connector", flag.ContinueOnError)
-	relayURL := flags.String("relay", "http://127.0.0.1:47471", "node-plane relay base URL")
+	flags.SetOutput(os.Stderr)
+	relayURL := flags.String("relay", "http://127.0.0.1:47471", "node-plane relay address or URL (bare host defaults to quic://HOST:47471)")
 	relaySSH := flags.String("relay-ssh", "", "reach node plane through OpenSSH (user@host or user@host:port)")
 	relayCertificatePin := flags.String("relay-cert-pin", "", "optional pre-provisioned SHA-256 pin of the relay TLS leaf certificate")
 	knownRelaysPath := flags.String("known-relays-file", defaultKnownRelaysPath, "TOFU relay certificate store")
@@ -55,7 +56,11 @@ func run() error {
 	maxStreams := flags.Int("max-streams", 64, "maximum simultaneous shell and SSH proxy streams")
 	verbose := flags.Bool("verbose", false, "enable debug logs")
 	showVersion := flags.Bool("version", false, "print version and exit")
+	flags.Usage = func() { printConnectorUsage(flags) }
 	if err := flags.Parse(cliargs.Current()); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if *showVersion {
@@ -172,4 +177,38 @@ func run() error {
 		}
 		return errors.New("SSH node tunnel ended")
 	}
+}
+
+func printConnectorUsage(flags *flag.FlagSet) {
+	output := flags.Output()
+	fmt.Fprintln(output, `Usage:
+  ariadne-connector --relay HOST --alias ALIAS [options]
+  ariadne-connector --relay-ssh USER@HOST[:PORT] --alias ALIAS [options]
+
+Ariadne connector keeps an outgoing node connection to the relay and exposes
+the local shell and structured exec only through requests received from it.
+
+Relay addresses:
+  HOST                 QUIC on the default port: quic://HOST:47471
+  HOST:PORT            QUIC on an explicit port
+  quic://HOST[:PORT]   Explicit QUIC; WSS fallback is automatic by default
+  https://HOST[:PORT]  WSS only
+  http://HOST[:PORT]   Plaintext; allowed on loopback unless explicitly enabled
+
+Relay trust (direct QUIC/WSS):
+  On first use, the relay certificate fingerprint is stored in known_relays.
+  Later connections require the same fingerprint. A changed certificate is
+  rejected with both fingerprints in the error. After verifying the relay,
+  rerun once with --accept-new-relay-certificate to replace the stored value.
+  --relay-cert-pin bypasses TOFU and requires an exact pre-provisioned pin.
+
+Examples:
+  ariadne-connector --relay relay.example --alias workstation
+  ariadne-connector --relay relay.example:48123 --alias workstation
+  ariadne-connector --relay https://relay.example:47471 --alias workstation
+  ariadne-connector --relay relay.example --accept-new-relay-certificate --alias workstation
+  ariadne-connector --relay-ssh breakglass@relay.example:22061 --alias workstation
+
+Options:`)
+	flags.PrintDefaults()
 }

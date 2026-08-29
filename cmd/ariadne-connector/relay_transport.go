@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -31,12 +32,16 @@ type configuredRelayTransport struct {
 }
 
 func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string, acceptNewCertificate bool, logger *slog.Logger) (configuredRelayTransport, error) {
-	parsed, err := url.Parse(rawURL)
+	normalizedURL, err := normalizeRelayURL(rawURL)
+	if err != nil {
+		return configuredRelayTransport{}, err
+	}
+	parsed, err := url.Parse(normalizedURL)
 	if err != nil {
 		return configuredRelayTransport{}, fmt.Errorf("parse relay URL: %w", err)
 	}
 	if !strings.EqualFold(parsed.Scheme, "quic") {
-		result := configuredRelayTransport{url: rawURL}
+		result := configuredRelayTransport{url: normalizedURL}
 		if parsed.Scheme != "https" && parsed.Scheme != "wss" {
 			if pin != "" {
 				return configuredRelayTransport{}, errors.New("--relay-cert-pin requires a TLS relay URL")
@@ -99,7 +104,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 	}
 
 	return configuredRelayTransport{
-		url: rawURL,
+		url: normalizedURL,
 		dial: func(ctx context.Context) (messageconn.Conn, error) {
 			quicContext, cancel := context.WithTimeout(ctx, 4*time.Second)
 			connection, quicErr := quictransport.Dial(quicContext, address, tlsConfig)
@@ -124,6 +129,37 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 			return messageconn.WebSocket{Conn: websocketConnection}, nil
 		},
 	}, nil
+}
+
+func normalizeRelayURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("relay address is empty")
+	}
+	if strings.Contains(value, "://") {
+		return value, nil
+	}
+	if strings.ContainsAny(value, "/?#@") || strings.ContainsAny(value, " \t\r\n") {
+		return "", errors.New("bare relay address must be a host or host:port; use a full URL for other forms")
+	}
+
+	addressValue := value
+	if strings.HasPrefix(addressValue, "[") && strings.HasSuffix(addressValue, "]") {
+		addressValue = strings.TrimSuffix(strings.TrimPrefix(addressValue, "["), "]")
+	}
+	if address, err := netip.ParseAddr(addressValue); err == nil {
+		return "quic://" + net.JoinHostPort(address.String(), defaultNodePort), nil
+	}
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		if host == "" || port == "" {
+			return "", errors.New("bare relay address must contain a non-empty host and port")
+		}
+		return "quic://" + net.JoinHostPort(host, port), nil
+	}
+	if strings.Contains(value, ":") {
+		return "", errors.New("invalid bare relay address; use HOST:PORT or a bracketed IPv6 address")
+	}
+	return "quic://" + net.JoinHostPort(value, defaultNodePort), nil
 }
 
 type relayCertificateTrust struct {

@@ -241,7 +241,9 @@ ariadne-mcp \
 Для прямого подключения удалённых нод relay может слушать QUIC/UDP и WSS/TCP
 на одном номере порта. Connector доверяет TLS-сертификату по модели TOFU,
 аналогичной SSH `StrictHostKeyChecking=accept-new`: при первом подключении
-запоминает отпечаток для `host:port`, а затем требует точного совпадения:
+запоминает отпечаток для `host:port`, а затем требует точного совпадения. Для
+короткой записи bare host означает `quic://HOST:47471`, а `HOST:PORT` — QUIC с
+явным портом. Полный URL переопределяет эти defaults:
 
 ```bash
 ./bin/ariadne-relay \
@@ -253,7 +255,7 @@ ariadne-mcp \
   --node-tls-key /path/privkey.pem
 
 ./bin/ariadne-connector \
-  --relay quic://relay.example:47471 \
+  --relay relay.example \
   --alias workstation
 ```
 
@@ -265,7 +267,7 @@ Trust store находится в `~/.config/ariadne/known_relays` и созда
 
 ```bash
 ./bin/ariadne-connector \
-  --relay quic://relay.example:47471 \
+  --relay relay.example \
   --accept-new-relay-certificate \
   --alias workstation
 ```

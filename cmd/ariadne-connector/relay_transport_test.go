@@ -31,6 +31,60 @@ func TestConfigureQUICRelayUsesAutomaticWSSFallback(t *testing.T) {
 	}
 }
 
+func TestConfigureBareRelayUsesQUICDefaults(t *testing.T) {
+	configured, err := configureRelayTransport(
+		"95.165.81.109",
+		"none",
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"",
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.url != "quic://95.165.81.109:47471" {
+		t.Fatalf("normalized relay URL=%q", configured.url)
+	}
+	if configured.dial == nil {
+		t.Fatal("bare relay did not configure QUIC")
+	}
+}
+
+func TestNormalizeRelayURL(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "95.165.81.109", want: "quic://95.165.81.109:47471"},
+		{input: "relay.example", want: "quic://relay.example:47471"},
+		{input: "relay.example:48123", want: "quic://relay.example:48123"},
+		{input: "2001:db8::1", want: "quic://[2001:db8::1]:47471"},
+		{input: "[2001:db8::1]", want: "quic://[2001:db8::1]:47471"},
+		{input: "[2001:db8::1]:48123", want: "quic://[2001:db8::1]:48123"},
+		{input: "https://relay.example:47471", want: "https://relay.example:47471"},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			got, err := normalizeRelayURL(test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("normalizeRelayURL(%q)=%q, want %q", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeRelayURLRejectsAmbiguousBareAddress(t *testing.T) {
+	for _, value := range []string{"", "relay.example/path", "relay.example:", "user@relay.example"} {
+		if _, err := normalizeRelayURL(value); err == nil {
+			t.Errorf("normalizeRelayURL(%q) succeeded", value)
+		}
+	}
+}
+
 func TestResolveFallbackURL(t *testing.T) {
 	relay, err := url.Parse("quic://relay.example:48123")
 	if err != nil {
