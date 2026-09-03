@@ -417,6 +417,37 @@ func TestExplicitPinStillUsesExactCertificate(t *testing.T) {
 	}
 }
 
+func TestPairingCodeIsUsedAtMostOncePerEndpoint(t *testing.T) {
+	nodeIdentity, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust, err := newRelayCertificateTrust("", filepath.Join(t.TempDir(), "known_relays"), false, "12345678", nodeIdentity, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust.setPairingAttemptLimit(2)
+	code, gotIdentity, err := trust.beginPairingAttempt("relay.example:14771")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != "12345678" || gotIdentity != nodeIdentity {
+		t.Fatalf("first pairing attempt=(%q,%p), want code and connector identity", code, gotIdentity)
+	}
+	if _, _, err := trust.beginPairingAttempt("relay.example:14771"); err == nil || !strings.Contains(err.Error(), "already attempted") {
+		t.Fatalf("repeated endpoint pairing error=%v", err)
+	}
+	if _, _, err := trust.beginPairingAttempt("relay.example:23771"); err != nil {
+		t.Fatalf("second endpoint pairing attempt failed: %v", err)
+	}
+	if trust.pairingEnabled() {
+		t.Fatal("pairing code remained available after the local attempt budget was exhausted")
+	}
+	if _, _, err := trust.beginPairingAttempt("relay.example:47471"); err == nil || !strings.Contains(err.Error(), "no longer available") {
+		t.Fatalf("exhausted pairing code error=%v", err)
+	}
+}
+
 func TestWSSPairingStoresAuthenticatedPinAndRedials(t *testing.T) {
 	certificateSource := httptest.NewTLSServer(http.NotFoundHandler())
 	certificate := certificateSource.TLS.Certificates[0]

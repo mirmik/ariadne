@@ -238,6 +238,49 @@
 
     .callout strong { display: block; margin-bottom: 0.2rem; }
 
+    .deep-answer {
+      margin: 2.5rem 0 1.5rem;
+      padding: clamp(1.2rem, 4vw, 2rem);
+      border: 2px solid var(--accent);
+      border-radius: var(--radius);
+      background: color-mix(in srgb, var(--accent-soft) 55%, var(--paper));
+      box-shadow: var(--shadow);
+    }
+
+    .deep-answer > p { max-width: 850px; }
+
+    .choice {
+      grid-column: span 6;
+      border-top: 5px solid var(--line);
+      box-shadow: none;
+    }
+
+    .choice.fake { border-top-color: var(--danger); }
+    .choice.proxy { border-top-color: var(--connector); }
+
+    .probability {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.8rem 1rem;
+      align-items: center;
+      margin: 1.25rem 0;
+      padding: 1rem;
+      border-radius: 14px;
+      background: var(--paper);
+    }
+
+    .probability strong {
+      color: var(--accent);
+      font-size: clamp(1.25rem, 4vw, 2rem);
+      letter-spacing: -0.04em;
+    }
+
+    .key-point {
+      padding: 1rem;
+      border-radius: 14px;
+      background: var(--paper);
+    }
+
     .terminal {
       margin: 1.4rem 0;
       overflow-x: auto;
@@ -476,6 +519,7 @@
     @media (max-width: 780px) {
       header { padding-top: 3.6rem; }
       .third, .half, .security-card { grid-column: 1 / -1; }
+      .choice { grid-column: 1 / -1; }
       .big-idea { grid-template-columns: 1fr; }
       .double-arrow { min-height: 4.5rem; }
       .double-arrow span { transform: rotate(90deg); }
@@ -592,6 +636,13 @@
         запоминает «лицо» relay — точный SHA-256 отпечаток его TLS-сертификата.
         В следующие разы секретная фраза уже не нужна: достаточно сверить лицо.
       </div>
+
+      <div class="callout warning">
+        <strong>Код — не ключ, которым шифруется весь трафик</strong>
+        Восемь цифр нужны только для короткой проверки при первой встрече. PAKE
+        превращает успешную проверку в новый случайный секрет высокой энтропии,
+        которым подтверждается 256-битный SHA-256 pin. Затем код уничтожается.
+      </div>
     </section>
 
     <section id="first-meeting">
@@ -633,6 +684,80 @@ $ ariadne-connector --relay relay.example --pairing-code <span class="code-value
           <p>Это маленький доверенный канал между двумя машинами: глазами, голосом или другим подходящим способом.</p>
         </article>
       </div>
+
+      <article class="deep-answer">
+        <p class="eyebrow">Тот самый вопрос</p>
+        <h3>Почему middle не может просто назвать себя relay?</h3>
+        <p>
+          Представим, что middle уже перехватил первый TLS, показал connector свой
+          сертификат и теперь видит сообщения OPAQUE. Одного сертификата недостаточно:
+          connector ещё не доверяет ему. Чтобы стать relay, middle должен закончить PAKE.
+        </p>
+
+        <h3>Что связывает настоящий relay с маленьким кодом</h3>
+        <div class="grid">
+          <div class="card third">
+            <span class="number">1</span>
+            <p><strong>При <code>ari pair</code></strong> relay берёт код и свежие случайные OPRF/AKE-ключи. Из них он создаёт OPAQUE credential record — условно, запечатанный набор учётных данных.</p>
+          </div>
+          <div class="card third">
+            <span class="number">2</span>
+            <p><strong>Connector ослепляет код.</strong> В <code>KE1</code> нет ни кода, ни обычного хеша кода. Свежая случайность делает повторные KE1 непохожими друг на друга.</p>
+          </div>
+          <div class="card third">
+            <span class="number">3</span>
+            <p><strong>Только согласованный ответ</strong> позволяет connector восстановить правильный AKE credential, получить общий session secret и проверить server MAC из <code>KE2</code>.</p>
+          </div>
+        </div>
+        <p class="key-point">
+          Middle не может взять увиденный <code>KE1</code>, подставлять в него
+          <code>00000000</code>, <code>00000001</code> и мгновенно понимать, где правильный
+          ответ. Transcript не содержит проверочного значения для offline-перебора.
+        </p>
+
+        <h3 style="margin-top: 2rem">У middle остаются ровно две стратегии</h3>
+        <div class="grid">
+          <div class="card choice fake">
+            <h3>А. Самостоятельно играть relay</h3>
+            <p>
+              Middle выбирает <em>одну</em> догадку, например <code>48290173</code>,
+              создаёт под неё свой OPAQUE record и отвечает connector. Если догадка
+              неверна, server MAC не сходится и connector не отправляет правильный KE3.
+            </p>
+            <p>
+              Это online-попытка: для следующей цифры нужен новый живой сеанс с
+              connector. Ariadne локально разрешает код не более одного раза на endpoint:
+              одна попытка при явном порте, максимум три при discovery стандартных портов.
+              Автоматические reconnect не дают новых попыток.
+            </p>
+            <div class="probability">
+              <strong>≤ 3 / 100 000 000</strong>
+              <span>Шанс слепого успеха за один запуск discovery, если код действительно равномерный и не был украден.</span>
+            </div>
+          </div>
+          <div class="card choice proxy">
+            <h3>Б. Пересылать пакеты настоящему relay</h3>
+            <p>
+              Middle может не гадать, а передать KE1 настоящему relay, вернуть connector
+              настоящий KE2 и переслать KE3 обратно. PAKE успешно завершится между
+              <strong>connector и настоящим relay</strong>; middle останется курьером и
+              не узнает их session secret.
+            </p>
+            <p>
+              Настоящий relay защищает HMAC-ом свой настоящий certificate pin. Заменить
+              pin на отпечаток сертификата middle без session secret невозможно.
+              Connector запоминает настоящий pin, закрывает первый TLS и подключается
+              заново. Теперь сертификат middle будет отвергнут.
+            </p>
+          </div>
+        </div>
+        <div class="callout">
+          <strong>Итог</strong>
+          Middle может угадать код за строго ограниченное число живых попыток,
+          прозрачно проксировать уже зашифрованный канал или сорвать соединение.
+          Незаметно подменить relay, перебрав код offline по записи трафика, он не может.
+        </div>
+      </article>
 
       <h3 style="margin-top: 2.4rem">Что происходит по сети</h3>
       <div class="sequence" aria-label="Последовательность commissioning">
@@ -751,12 +876,12 @@ $ ariadne-connector --relay relay.example --pairing-code <span class="code-value
         <article class="card security-card">
           <span class="icon">1</span>
           <h3>Код не передаётся как пароль</h3>
-          <p>По сети идут сообщения OPAQUE. Перехваченный transcript не становится удобной базой для автономного перебора всех 100 миллионов кодов.</p>
+          <p>KE1 содержит ослеплённое кодом значение со свежей случайностью. Перехваченный transcript не становится проверочной базой для автономного перебора всех 100 миллионов кодов.</p>
         </article>
         <article class="card security-card">
           <span class="icon">2</span>
-          <h3>Перебор ограничен relay</h3>
-          <p>Проверить догадку можно только активной попыткой против открытого окна. По умолчанию их пять, после чего окно закрывается.</p>
+          <h3>Online-перебор ограничен с двух сторон</h3>
+          <p>Relay принимает до пяти клиентских догадок. Connector даёт фальшивым серверам не более одной попытки на endpoint — максимум три при автоматическом discovery.</p>
         </article>
         <article class="card security-card">
           <span class="icon">3</span>
@@ -801,8 +926,8 @@ $ ariadne-connector --relay relay.example --pairing-code <span class="code-value
             </tr>
             <tr>
               <td data-label="Сценарий"><strong>Фальшивый relay</strong></td>
-              <td data-label="Действия">Подсовывает свой TLS-сертификат и пытается ответить на KE1.</td>
-              <td data-label="Результат"><span class="status good">PAKE не завершается.</span> Фальшивка не создаст правильный server MAC.</td>
+              <td data-label="Действия">Подсовывает свой TLS-сертификат, выбирает одну догадку кода и создаёт под неё собственный OPAQUE record.</td>
+              <td data-label="Результат"><span class="status good">Неверная догадка обрывает PAKE.</span> Следующая требует нового живого сеанса, а connector не повторяет код на том же endpoint.</td>
             </tr>
             <tr>
               <td data-label="Сценарий"><strong>Прозрачный active MITM</strong></td>
@@ -811,8 +936,8 @@ $ ariadne-connector --relay relay.example --pairing-code <span class="code-value
             </tr>
             <tr>
               <td data-label="Сценарий"><strong>Перебор кода</strong></td>
-              <td data-label="Действия">Отправляет догадки открытому relay.</td>
-              <td data-label="Результат"><span class="status partial">Не более пяти online-попыток</span> на стандартное окно, затем код перестаёт работать.</td>
+              <td data-label="Действия">Как fake client атакует relay или как fake relay атакует connector.</td>
+              <td data-label="Результат"><span class="status partial">Только ограниченные online-попытки:</span> пять на relay; одна на явный endpoint или максимум три на полный discovery со стороны connector.</td>
             </tr>
             <tr>
               <td data-label="Сценарий"><strong>Повтор старого handshake</strong></td>
@@ -872,7 +997,7 @@ $ ariadne-connector --relay relay.example --pairing-code <span class="code-value
       </details>
       <details>
         <summary>Почему восьми цифр достаточно?</summary>
-        <p>Сами по себе восемь цифр — слабый постоянный пароль. Здесь код короткоживущий, одноразовый, допускает лишь несколько online-попыток, а OPAQUE не отдаёт перехватчику удобный материал для offline-перебора.</p>
+        <p>Сами по себе восемь цифр — слабый постоянный пароль. Здесь OPAQUE не отдаёт перехватчику материал для offline-проверки догадок, а обе стороны ограничивают живые попытки: relay — пятью, connector — одним использованием на endpoint. При discovery это максимум три догадки из 100 миллионов за один запуск. После подозрительной ошибки следует создать новый код, а не многократно запускать connector со старым.</p>
       </details>
       <details>
         <summary>Дефис в pairing-коде обязателен?</summary>
@@ -888,7 +1013,7 @@ $ ariadne-connector --relay relay.example --pairing-code <span class="code-value
       </details>
       <details>
         <summary>При чём здесь Matter?</summary>
-        <p>Взята та же понятная жизненная модель: короткий код, ограниченное окно commissioning, PAKE и закрепление долговременной identity. Конкретный PAKE Ariadne — OPAQUE по RFC 9807.</p>
+        <p>Взята та же понятная жизненная модель: короткий код, ограниченное окно commissioning, PAKE и закрепление долговременной identity. Конкретный PAKE Ariadne — OPAQUE по <a href="https://www.rfc-editor.org/rfc/rfc9807.html">RFC 9807</a>. Как и любой PAKE с коротким секретом, он требует ограничения online-догадок с обеих сторон.</p>
       </details>
     </section>
   </main>

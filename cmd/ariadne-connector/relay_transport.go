@@ -80,6 +80,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 			return configuredRelayTransport{}, err
 		}
 		result.dial = func(ctx context.Context) (messageconn.Conn, error) {
+			pairingExpected := trust.pairingEnabled()
 			tlsConfig, endpoint, err := trust.tlsConfig(parsed, "443")
 			if err != nil {
 				return nil, err
@@ -88,7 +89,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 			if err != nil {
 				return nil, err
 			}
-			if !trust.pairingEnabled() {
+			if !pairingExpected {
 				return connection, nil
 			}
 			return trust.pairAndRedial(ctx, connection, endpoint, parsed.Hostname(), func(config *tls.Config) (messageconn.Conn, error) {
@@ -106,6 +107,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 		return configuredRelayTransport{}, err
 	}
 	endpoints := quicRelayEndpoints(rawURL, parsed)
+	trust.setPairingAttemptLimit(len(endpoints))
 	candidates := make([]relayDialCandidate, 0, len(endpoints))
 	for index, endpoint := range endpoints {
 		candidateFallback := fallbackValue
@@ -138,6 +140,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 		candidates = append(candidates, relayDialCandidate{
 			endpoint: address,
 			dial: func(ctx context.Context) (messageconn.Conn, error) {
+				pairingExpected := trust.pairingEnabled()
 				tlsConfig, canonicalEndpoint, err := trust.tlsConfig(candidateEndpoint, defaultNodePort)
 				if err != nil {
 					return nil, err
@@ -148,7 +151,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 					if err != nil {
 						return nil, err
 					}
-					if trust.pairingEnabled() && fallbackEndpoint != canonicalEndpoint {
+					if pairingExpected && fallbackEndpoint != canonicalEndpoint {
 						return nil, errors.New("pairing requires QUIC and WSS fallback to use the same host and port")
 					}
 					fallbackHTTPClient = tlsHTTPClient(fallbackTLSConfig)
@@ -157,7 +160,7 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 				if err != nil {
 					return nil, err
 				}
-				if !trust.pairingEnabled() {
+				if !pairingExpected {
 					return connection, nil
 				}
 				return trust.pairAndRedial(ctx, connection, canonicalEndpoint, candidateEndpoint.Hostname(), func(config *tls.Config) (messageconn.Conn, error) {
@@ -365,6 +368,9 @@ type relayCertificateTrust struct {
 	logger               *slog.Logger
 	mu                   sync.Mutex
 	observedPins         map[string]string
+	pairingAttempts      map[string]struct{}
+	pairingAttemptLimit  int
+	pairingComplete      bool
 }
 
 func newRelayCertificateTrust(pin, knownRelaysPath string, acceptNewCertificate bool, pairingCode string, nodeIdentity *identity.Identity, logger *slog.Logger) (*relayCertificateTrust, error) {
@@ -401,6 +407,8 @@ func newRelayCertificateTrust(pin, knownRelaysPath string, acceptNewCertificate 
 		nodeIdentity:         nodeIdentity,
 		logger:               logger,
 		observedPins:         make(map[string]string),
+		pairingAttempts:      make(map[string]struct{}),
+		pairingAttemptLimit:  1,
 	}, nil
 }
 
@@ -408,6 +416,36 @@ func (trust *relayCertificateTrust) pairingEnabled() bool {
 	trust.mu.Lock()
 	defer trust.mu.Unlock()
 	return trust.pairingCode != ""
+}
+
+func (trust *relayCertificateTrust) setPairingAttemptLimit(limit int) {
+	if limit <= 0 {
+		limit = 1
+	}
+	trust.mu.Lock()
+	trust.pairingAttemptLimit = limit
+	trust.mu.Unlock()
+}
+
+func (trust *relayCertificateTrust) beginPairingAttempt(endpoint string) (string, *identity.Identity, error) {
+	trust.mu.Lock()
+	defer trust.mu.Unlock()
+	if trust.pairingComplete {
+		return "", nil, errors.New("relay pairing has already completed")
+	}
+	if _, attempted := trust.pairingAttempts[endpoint]; attempted {
+		return "", nil, fmt.Errorf("pairing with relay %s was already attempted; restart with a fresh pairing code", endpoint)
+	}
+	if trust.pairingCode == "" {
+		return "", nil, errors.New("relay pairing code is no longer available; restart with a fresh pairing code")
+	}
+	trust.pairingAttempts[endpoint] = struct{}{}
+	code := trust.pairingCode
+	nodeIdentity := trust.nodeIdentity
+	if len(trust.pairingAttempts) >= trust.pairingAttemptLimit {
+		trust.pairingCode = ""
+	}
+	return code, nodeIdentity, nil
 }
 
 func (trust *relayCertificateTrust) tlsConfig(relayURL *url.URL, defaultPort string) (*tls.Config, string, error) {
@@ -476,22 +514,29 @@ func (trust *relayCertificateTrust) pairAndRedial(
 	serverName string,
 	redial func(*tls.Config) (messageconn.Conn, error),
 ) (messageconn.Conn, error) {
-	trust.mu.Lock()
-	pairingCode := trust.pairingCode
-	nodeIdentity := trust.nodeIdentity
-	trust.mu.Unlock()
+	pairingCode, nodeIdentity, err := trust.beginPairingAttempt(endpoint)
+	if err != nil {
+		connection.CloseNow()
+		return nil, err
+	}
 	pairedPin, err := pairing.PairRelay(ctx, connection, pairingCode, nodeIdentity)
 	connection.CloseNow()
 	if err != nil {
 		return nil, err
 	}
+	trust.mu.Lock()
+	if trust.pairingComplete {
+		trust.mu.Unlock()
+		return nil, errors.New("another relay pairing attempt completed first")
+	}
 	result, err := trust.store.TrustPin(endpoint, pairedPin, true)
 	if err != nil {
+		trust.mu.Unlock()
 		return nil, fmt.Errorf("save paired relay identity: %w", err)
 	}
-	trust.mu.Lock()
 	observedPin := trust.observedPins[endpoint]
 	trust.pairingCode = ""
+	trust.pairingComplete = true
 	trust.mu.Unlock()
 	if trust.logger != nil {
 		trust.logger.Info("paired relay identity", "endpoint", endpoint, "certificate_pin", result.Pin, "known_relays_file", trust.store.Path())
