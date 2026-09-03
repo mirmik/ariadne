@@ -24,6 +24,7 @@ import (
 	"github.com/mirmik/ariadne/internal/managementauth"
 	"github.com/mirmik/ariadne/internal/messageconn"
 	"github.com/mirmik/ariadne/internal/noderegistry"
+	"github.com/mirmik/ariadne/internal/pairing"
 	"github.com/mirmik/ariadne/internal/wire"
 	"golang.org/x/crypto/ssh"
 )
@@ -42,6 +43,9 @@ type Config struct {
 	MaxOnlineNodes       int
 	ManagementToken      string
 	RegistryPath         string
+	RelayCertificatePin  string
+	PairingTTL           time.Duration
+	MaxPairingAttempts   int
 }
 
 func DefaultConfig() Config {
@@ -56,6 +60,8 @@ func DefaultConfig() Config {
 		PingTimeout:          10 * time.Second,
 		MaxPendingHandshakes: 64,
 		MaxOnlineNodes:       1024,
+		PairingTTL:           pairing.DefaultTTL,
+		MaxPairingAttempts:   pairing.DefaultAttempts,
 	}
 }
 
@@ -72,6 +78,7 @@ type Server struct {
 	claimsByID     map[string]string
 	claimedByAlias map[string]string
 	registry       *noderegistry.Store
+	pairing        pairing.Window
 }
 
 func New(config Config, logger *slog.Logger) (*Server, error) {
@@ -114,6 +121,12 @@ func New(config Config, logger *slog.Logger) (*Server, error) {
 	if config.MaxOnlineNodes <= 0 {
 		config.MaxOnlineNodes = defaults.MaxOnlineNodes
 	}
+	if config.PairingTTL <= 0 {
+		config.PairingTTL = defaults.PairingTTL
+	}
+	if config.MaxPairingAttempts <= 0 {
+		config.MaxPairingAttempts = defaults.MaxPairingAttempts
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -153,6 +166,7 @@ func (server *Server) NodeHandler() http.Handler {
 func (server *Server) ManagementHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.handleHealth)
+	mux.HandleFunc("POST /v1/pairing", server.handleOpenPairing)
 	mux.HandleFunc("GET /v1/nodes", server.handleNodes)
 	mux.HandleFunc("POST /v1/nodes/", server.handleNodeAction)
 	mux.HandleFunc("GET /v1/nodes/", server.handleNodeAction)
@@ -187,6 +201,24 @@ func (server *Server) Close() {
 
 func (server *Server) handleHealth(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]string{"status": "ok", "version": server.config.Version})
+}
+
+func (server *Server) handleOpenPairing(response http.ResponseWriter, request *http.Request) {
+	if server.config.RelayCertificatePin == "" {
+		writeAPIError(response, http.StatusConflict, "relay pairing requires a TLS node certificate")
+		return
+	}
+	opening, err := server.pairing.Open(time.Now().UTC(), server.config.PairingTTL, server.config.MaxPairingAttempts)
+	if err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "could not open relay pairing")
+		return
+	}
+	server.logger.Info("opened relay pairing window", "expires_at", opening.ExpiresAt, "attempts", opening.RemainingAttempts)
+	writeJSON(response, http.StatusCreated, wire.PairingOpenResponse{
+		Code:              opening.Code,
+		ExpiresAt:         opening.ExpiresAt,
+		RemainingAttempts: opening.RemainingAttempts,
+	})
 }
 
 func (server *Server) handleNodes(response http.ResponseWriter, request *http.Request) {
@@ -371,7 +403,16 @@ func (server *Server) serveConnector(connection messageconn.Conn, handshakeSlotH
 
 	handshakeContext, cancel := context.WithTimeout(server.context, server.config.RegistrationTimeout)
 	defer cancel()
-	hello, publicKey, err := readAndValidateHello(handshakeContext, connection)
+	firstEnvelope, err := readControl(handshakeContext, connection)
+	if err != nil {
+		server.writeProtocolError(connection, "invalid_hello", err.Error())
+		return
+	}
+	if firstEnvelope.Type == wire.MessagePairRequest {
+		server.servePairing(handshakeContext, connection, firstEnvelope)
+		return
+	}
+	hello, publicKey, err := validateHelloEnvelope(firstEnvelope)
 	if err != nil {
 		server.writeProtocolError(connection, "invalid_hello", err.Error())
 		return
@@ -517,11 +558,7 @@ func (server *Server) revoke(target string) error {
 	return nil
 }
 
-func readAndValidateHello(ctx context.Context, connection messageconn.Conn) (wire.Hello, ed25519.PublicKey, error) {
-	envelope, err := readControl(ctx, connection)
-	if err != nil {
-		return wire.Hello{}, nil, err
-	}
+func validateHelloEnvelope(envelope wire.Envelope) (wire.Hello, ed25519.PublicKey, error) {
 	if envelope.Type != wire.MessageHello {
 		return wire.Hello{}, nil, fmt.Errorf("expected %s, got %s", wire.MessageHello, envelope.Type)
 	}
@@ -562,6 +599,69 @@ func readAndValidateHello(ctx context.Context, connection messageconn.Conn) (wir
 		return wire.Hello{}, nil, fmt.Errorf("invalid embedded SSH host key: %w", err)
 	}
 	return hello, publicKey, nil
+}
+
+func (server *Server) servePairing(ctx context.Context, connection messageconn.Conn, envelope wire.Envelope) {
+	request, err := wire.DecodePayload[wire.PairingRequest](envelope)
+	if err != nil {
+		server.writeProtocolError(connection, "invalid_pairing", err.Error())
+		return
+	}
+	ke1, err := base64.RawStdEncoding.DecodeString(request.KE1)
+	if err != nil {
+		server.writeProtocolError(connection, "invalid_pairing", "pairing KE1 is not valid base64")
+		return
+	}
+	publicKey, err := identity.ParsePublicKey(request.PublicKey)
+	if err != nil || identity.NodeID(publicKey) != request.NodeID {
+		server.writeProtocolError(connection, "invalid_pairing", "pairing node identity does not match its public key")
+		return
+	}
+	signature, err := identity.ParseSignature(request.Signature)
+	if err != nil || !ed25519.Verify(publicKey, wire.PairingIdentityTranscript(request.NodeID, request.PublicKey, ke1), signature) {
+		server.writeProtocolError(connection, "invalid_pairing", "pairing node identity signature is not valid")
+		return
+	}
+	ke2, session, err := server.pairing.Begin(time.Now().UTC(), request.NodeID, ke1)
+	if err != nil {
+		server.writeProtocolError(connection, "pairing_unavailable", err.Error())
+		return
+	}
+	if err := writeControl(ctx, connection, wire.MessagePairResponse, "", wire.PairingResponse{
+		KE2: base64.RawStdEncoding.EncodeToString(ke2),
+	}); err != nil {
+		return
+	}
+	confirmationEnvelope, err := readControl(ctx, connection)
+	if err != nil {
+		return
+	}
+	if confirmationEnvelope.Type != wire.MessagePairConfirm {
+		server.writeProtocolError(connection, "invalid_pairing", fmt.Sprintf("expected %s, got %s", wire.MessagePairConfirm, confirmationEnvelope.Type))
+		return
+	}
+	confirmation, err := wire.DecodePayload[wire.PairingConfirm](confirmationEnvelope)
+	if err != nil {
+		server.writeProtocolError(connection, "invalid_pairing", err.Error())
+		return
+	}
+	ke3, err := base64.RawStdEncoding.DecodeString(confirmation.KE3)
+	if err != nil {
+		server.writeProtocolError(connection, "invalid_pairing", "pairing KE3 is not valid base64")
+		return
+	}
+	binding, err := session.Finish(ke3, server.config.RelayCertificatePin)
+	if err != nil {
+		server.writeProtocolError(connection, "pairing_failed", err.Error())
+		return
+	}
+	if err := writeControl(ctx, connection, wire.MessagePairComplete, "", wire.PairingComplete{
+		RelayCertificatePin: server.config.RelayCertificatePin,
+		ConfirmationMAC:     binding,
+	}); err != nil {
+		return
+	}
+	server.logger.Info("completed relay pairing", "node_id", request.NodeID)
 }
 
 func parseWireSSHKey(encoded string) (ssh.PublicKey, error) {

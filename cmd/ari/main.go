@@ -84,6 +84,8 @@ func run(arguments []string) int {
 	command := flags.Arg(0)
 	commandArguments := flags.Args()[1:]
 	switch command {
+	case "pair":
+		err = runPair(runContext, apiClient, commandArguments)
 	case "nodes":
 		err = runNodes(runContext, apiClient, commandArguments)
 	case "claim":
@@ -123,6 +125,19 @@ func run(arguments []string) int {
 		return 1
 	}
 	return 0
+}
+
+func runPair(ctx context.Context, apiClient *client.Client, arguments []string) error {
+	if len(arguments) != 0 {
+		return errors.New("usage: ari pair")
+	}
+	opening, err := apiClient.OpenPairing(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pairing code: %s\n", opening.Code)
+	fmt.Printf("expires: %s (%d attempts)\n", opening.ExpiresAt.Local().Format(time.RFC3339), opening.RemainingAttempts)
+	return nil
 }
 
 func runJob(ctx context.Context, apiClient *client.Client, arguments []string) error {
@@ -428,6 +443,7 @@ func runProxy(ctx context.Context, apiClient *client.Client, arguments []string)
 
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, `Usage:
+  ari [global flags] pair
   ari [global flags] nodes
   ari [global flags] claim NODE_ID ALIAS
   ari [global flags] revoke NODE_ID

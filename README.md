@@ -7,7 +7,8 @@ Ariadne даёт агенту или человеку доступ к машин
 - `ariadne-relay` — registry online-узлов и маршрутизация потоков;
 - `ariadne-connector` — исходящее соединение, постоянная Ed25519 identity, встроенный SSH endpoint, PTY, опциональный forwarding до локального `sshd`, структурированный exec и атомарная передача файлов;
 - `ari` — команды `nodes`, `exec`, zero-config `shell` и OpenSSH-совместимый `proxy`;
-- challenge-response регистрации без bootstrap-секрета, reconnect, лимиты времени, параллелизма и вывода;
+- PAKE commissioning для первого знакомства, challenge-response регистрации,
+  reconnect и лимиты времени, параллелизма и вывода;
 - unit-тесты и интеграционный тест полного relay → connector пути.
 
 ## Как устроен текущий data plane
@@ -18,7 +19,7 @@ ari shell / ari exec
         ▼
    ariadne-relay
         ▲
-        │ исходящее QUIC/UDP, с WSS/TCP fallback (:47471)
+        │ исходящее QUIC/UDP, с WSS/TCP fallback (:14771 рекомендуется)
         │
  ariadne-connector ── PTY ── shell того же OS-пользователя
 ```
@@ -130,9 +131,10 @@ ariadne-connector autostart uninstall
 `--relay-ssh`) обязателен; повторный `autostart install` без параметров сохраняет
 прежнюю конфигурацию и только обновляет бинарник. Скачанный бинарник можно удалить: installer
 копирует его под content-addressed именем, поэтому повторный `install` новой
-версией безопасно переключает следующий запуск на обновление. Identity и TOFU
+версией безопасно переключает следующий запуск на обновление. Identity и relay trust
 store остаются в обычном пользовательском config-каталоге и при обновлении не
-пересоздаются. Одноразовый `--accept-new-relay-certificate` сохранять в
+пересоздаются. Pairing сначала выполняется обычным запуском connector;
+одноразовые `--pairing-code` и `--accept-new-relay-certificate` сохранять в
 автозапуск запрещено.
 
 На Windows создаётся задача `Ariadne Connector` с logon type
@@ -265,7 +267,7 @@ Host phone
 
 ## Доступ connector к node plane
 
-Relay запускает два независимых HTTP server. Management plane слушает `127.0.0.1:8088`, connector-facing node plane — `127.0.0.1:47471`. Если через роутер уже доступен SSH, node port пробрасывать не требуется: внешний connector сам поднимает ограниченный tunnel через `breakglass`:
+Relay запускает два независимых HTTP server. Management plane слушает `127.0.0.1:8088`, connector-facing node plane по умолчанию — `127.0.0.1:14771`. Если через роутер уже доступен SSH, node port пробрасывать не требуется: внешний connector сам поднимает ограниченный tunnel через `breakglass`:
 
 ```bash
 ariadne-connector \
@@ -273,7 +275,7 @@ ariadne-connector \
   --alias phone
 ```
 
-SSH port после двоеточия необязателен; без него OpenSSH использует config или порт `22`. OpenSSH запрашивает временный break-glass пароль, создаёт local forward до `127.0.0.1:47471` на relay и остаётся дочерним процессом connector. После истечения password TTL установленный tunnel продолжает работать. Если SSH-соединение оборвётся, connector завершится: для нового входа нужно снова открыть break-glass окно и перезапустить connector.
+SSH port после двоеточия необязателен; без него OpenSSH использует config или порт `22`. OpenSSH запрашивает временный break-glass пароль, создаёт local forward до `127.0.0.1:14771` на relay и остаётся дочерним процессом connector. После истечения password TTL установленный tunnel продолжает работать. Если SSH-соединение оборвётся, connector завершится: для нового входа нужно снова открыть break-glass окно и перезапустить connector.
 
 `ari` в основном сценарии работает рядом с relay и обращается к `http://127.0.0.1:8088`, используя локальный management token. Для другой доверенной management-машины token-файл нужно безопасно доставить отдельно, а соединение провести через SSH tunnel или TLS. Явный `--allow-insecure-management-listen` разрешает plaintext bearer token на non-loopback адресе и предназначен только для изолированной доверенной сети. Режим `ari --relay-ssh` сохранён как вспомогательный вариант; на машине с `ari` всё равно должен быть management token-файл.
 
@@ -296,31 +298,50 @@ ariadne-mcp \
 настраиваются независимо.
 
 Для прямого подключения удалённых нод relay может слушать QUIC/UDP и WSS/TCP
-на одном номере порта. Connector доверяет TLS-сертификату по модели TOFU,
-аналогичной SSH `StrictHostKeyChecking=accept-new`: при первом подключении
-запоминает отпечаток для `host:port`, а затем требует точного совпадения. Для
-короткой записи bare host означает `quic://HOST:47471`, а `HOST:PORT` — QUIC с
-явным портом. Полный URL переопределяет эти defaults:
+на одном номере порта. Первое знакомство выполняется через короткоживущий
+pairing-код и PAKE, по схеме commissioning в Matter. После PAKE connector
+сохраняет аутентифицированный отпечаток TLS-сертификата для `host:port`,
+закрывает временный сеанс и подключается заново с жёсткой проверкой pin. Для
+короткой записи bare host и `quic://HOST` конкурентно пробуют порты `14771`,
+`23771`, `47471`; первый порт является рекомендуемым, последний оставлен для
+совместимости. `HOST:PORT` и `quic://HOST:PORT` задают ровно один endpoint.
+Полный HTTP(S)/WS(S) URL переопределяет transport и не включает discovery:
 
 ```bash
 ./bin/ariadne-relay \
   --management-listen 127.0.0.1:8088 \
-  --node-listen 192.168.0.61:47471 \
-  --node-loopback-listen 127.0.0.1:47471 \
-  --node-quic-listen 192.168.0.61:47471 \
+  --node-listen 192.168.0.61:14771 \
+  --node-loopback-listen 127.0.0.1:14771 \
+  --node-quic-listen 192.168.0.61:14771 \
   --node-tls-cert /path/fullchain.pem \
   --node-tls-key /path/privkey.pem
 
+# На машине relay; команда использует закрытый management plane.
+ari pair
+# pairing code: 12345678
+
 ./bin/ariadne-connector \
   --relay relay.example \
+  --pairing-code 12345678 \
   --alias workstation
 ```
 
 Trust store находится в `~/.config/ariadne/known_relays` и создаётся с правами
-`0600`. QUIC и WSS на одном `host:port` используют одну запись. Если relay
-предъявил другой сертификат, connector блокирует соединение и печатает старый и
-новый отпечатки. После независимой проверки новой identity пользователь может
-явно принять ровно одну замену:
+`0600`. Pairing-код содержит восемь цифр, действует по умолчанию пять минут,
+допускает пять PAKE-попыток и расходуется после первого успешного commissioning.
+`ari pair` печатает код без разделителя; connector также принимает запись с
+необязательным дефисом после четвёртой цифры. Relay хранит в памяти
+OPAQUE-verifier, а не сам код. Лимиты меняются флагами relay `--pairing-ttl` и
+`--max-pairing-attempts`. Успешный PAKE закрепляет TLS identity relay на
+connector и криптографически связывает commissioning с Ed25519 identity
+connector. Регистрация identity и management claim alias остаются отдельным
+процессом. Для SSH tunnel pairing не нужен: relay уже аутентифицируется
+системным OpenSSH.
+
+QUIC и WSS на одном `host:port` используют одну запись. Если relay предъявил
+другой сертификат, connector блокирует соединение. Рекомендуемый способ
+ротации — открыть новое окно `ari pair` и повторить commissioning с
+`--pairing-code`. Для аварийной ручной процедуры сохранена одноразовая замена:
 
 ```bash
 ./bin/ariadne-connector \
@@ -329,16 +350,17 @@ Trust store находится в `~/.config/ariadne/known_relays` и созда
   --alias workstation
 ```
 
-Как и у SSH TOFU, самое первое подключение уязвимо для активного MITM. Для
-unattended provisioning с заранее известной identity сохранён
-`--relay-cert-pin sha256:HEX_DIGEST`; при его наличии trust store не
-используется. Путь store можно изменить через `--known-relays-file`.
+Для unattended provisioning с заранее известной identity сохранён
+`--relay-cert-pin sha256:HEX_DIGEST`; при его наличии PAKE и trust store не
+используются. Путь store можно изменить через `--known-relays-file`.
 
-Для автоматического fallback нужно пробросить на relay и UDP, и TCP `47471`;
-connector сначала использует QUIC, а через четыре секунды пробует
-`https://relay.example:47471/v1/connect`. Fallback можно отключить флагом
-`--relay-fallback none` или заменить отдельным URL. Management plane через
-роутер не публикуется.
+Для автоматического fallback нужно пробросить на relay UDP и TCP одного
+выбранного порта. Для адреса без порта connector параллельно проверяет все три
+кандидата; внутри каждого кандидата сначала используется QUIC, а через четыре
+секунды — `https://HOST:PORT/v1/connect`. Успешный endpoint закрепляется до
+перезапуска connector. Fallback можно отключить флагом
+`--relay-fallback none` или заменить отдельным URL. Явный fallback URL
+запрашивается только один раз. Management plane через роутер не публикуется.
 Дополнительный `--node-loopback-listen` сохраняет plaintext endpoint только на
 loopback для режима `--relay-ssh`; наружу он не доступен.
 
@@ -351,11 +373,20 @@ ari --relay-ssh breakglass@relay-host shell phone
 
 Обе программы используют системный OpenSSH и выбирают свободный loopback-порт. Ручной `ssh -L` также поддерживается.
 
-У connector нет bootstrap bearer token. Публичный node plane принимает новые self-authenticated Ed25519 identities, но не содержит управляющих endpoints. QUIC использует TLS 1.3, ALPN `ariadne/1`, отключённый 0-RTT и keepalive; при разрыве connector переподключается с той же identity. Отдельный management bearer token защищает `nodes`, `claim`, `revoke`, `exec` и stream endpoints даже на loopback. Management plane по умолчанию разрешено привязать только к loopback. Флаги `--allow-insecure-management-listen`, `--allow-insecure-node-listen` и `--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
+У connector нет bootstrap bearer token. Публичный node plane принимает новые
+self-authenticated Ed25519 identities, но не содержит управляющих endpoints;
+pairing защищает первое доверие connector к relay, а человекочитаемый alias
+требует отдельного management claim. QUIC
+использует TLS 1.3, ALPN `ariadne/1`, отключённый 0-RTT и keepalive; при разрыве
+connector переподключается с той же identity. Отдельный management bearer token
+защищает `pair`, `nodes`, `claim`, `revoke`, `exec` и stream endpoints даже на
+loopback. Management plane по умолчанию разрешено привязать только к loopback.
+Флаги `--allow-insecure-management-listen`, `--allow-insecure-node-listen` и
+`--allow-insecure-relay` предназначены для явных plaintext-экспериментов.
 
 ## Текущие ограничения
 
-- неизвестные node identities допускаются без предварительного enrollment; первое доверие alias всё ещё требует management claim;
+- публичный node plane по-прежнему допускает новые self-authenticated Ed25519 identities; pairing защищает первое доверие connector к relay, а alias требует отдельного management claim;
 - identity и aliases сохраняются, но presence и connector-owned jobs остаются только в памяти соответствующих процессов;
 - одна relay-инстанция без распределённого presence;
 - нет namespace, ACL, approvals, внутренней CA и mTLS;

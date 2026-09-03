@@ -31,6 +31,10 @@ type MessageType string
 
 const (
 	MessageHello        MessageType = "connector.hello"
+	MessagePairRequest  MessageType = "pairing.request"
+	MessagePairResponse MessageType = "pairing.response"
+	MessagePairConfirm  MessageType = "pairing.confirm"
+	MessagePairComplete MessageType = "pairing.complete"
 	MessageChallenge    MessageType = "relay.challenge"
 	MessageRegister     MessageType = "connector.register"
 	MessageRegistered   MessageType = "relay.registered"
@@ -62,6 +66,32 @@ type Hello struct {
 	Architecture     string   `json:"architecture"`
 	ConnectorVersion string   `json:"connector_version"`
 	Capabilities     []string `json:"capabilities,omitempty"`
+}
+
+type PairingRequest struct {
+	NodeID    string `json:"node_id"`
+	PublicKey string `json:"public_key"`
+	KE1       string `json:"ke1"`
+	Signature string `json:"signature"`
+}
+
+type PairingResponse struct {
+	KE2 string `json:"ke2"`
+}
+
+type PairingConfirm struct {
+	KE3 string `json:"ke3"`
+}
+
+type PairingComplete struct {
+	RelayCertificatePin string `json:"relay_certificate_pin"`
+	ConfirmationMAC     string `json:"confirmation_mac"`
+}
+
+type PairingOpenResponse struct {
+	Code              string    `json:"code"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	RemainingAttempts int       `json:"remaining_attempts"`
 }
 
 type Challenge struct {
@@ -308,6 +338,15 @@ func RegistrationTranscript(nonce []byte, hello Hello) []byte {
 	transcript = appendField(transcript, []byte(hello.Platform))
 	transcript = appendField(transcript, []byte(hello.Architecture))
 	transcript = appendField(transcript, []byte(hello.ConnectorVersion))
+	return transcript
+}
+
+func PairingIdentityTranscript(nodeID, publicKey string, ke1 []byte) []byte {
+	transcript := make([]byte, 0, 192)
+	transcript = append(transcript, "ariadne/pairing-identity/v1"...)
+	transcript = appendField(transcript, []byte(nodeID))
+	transcript = appendField(transcript, []byte(publicKey))
+	transcript = appendField(transcript, ke1)
 	return transcript
 }
 

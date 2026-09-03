@@ -51,7 +51,7 @@ Match User breakglass
     PubkeyAuthentication no
     AllowAgentForwarding no
     AllowTcpForwarding local
-    PermitOpen 127.0.0.1:47471 127.0.0.1:8088
+    PermitOpen 127.0.0.1:14771 127.0.0.1:23771 127.0.0.1:47471 127.0.0.1:8088
     X11Forwarding no
     PermitTunnel no
     PermitUserRC no
@@ -121,9 +121,10 @@ sudo -iu working-user
 
 Это даёт сессии права и домашний каталог `working-user`, но не предоставляет отдельного root-доступа. Если рабочая учётная запись сама имеет дополнительные права sudo, продолжает действовать её обычная политика sudo.
 
-Аккаунту разрешены только два local forwarding destination Ariadne:
+Аккаунту разрешены только четыре local forwarding destination Ariadne:
 
-- node plane `127.0.0.1:47471` — основной tunnel внешнего connector;
+- node plane `127.0.0.1:14771` — рекомендуемый tunnel внешнего connector;
+- резервные node endpoints `127.0.0.1:23771` и `127.0.0.1:47471`;
 - management plane `127.0.0.1:8088` — вспомогательный разовый tunnel для `ari`.
 
 Основной сценарий запуска connector на внешней машине:
@@ -138,7 +139,7 @@ ariadne-connector --relay-ssh breakglass@server:22061 --alias phone
 Ручной эквивалент node tunnel:
 
 ```bash
-ssh -N -T -L 127.0.0.1:17471:127.0.0.1:47471 breakglass@server
+ssh -N -T -L 127.0.0.1:17471:127.0.0.1:14771 breakglass@server
 ariadne-connector --relay http://127.0.0.1:17471 --alias phone
 ```
 
@@ -161,7 +162,7 @@ ari --relay-ssh breakglass@server shell TARGET
 token. Поэтому вспомогательный режим требует безопасно скопированного
 `management.token` и при необходимости флага `--management-token-file PATH`.
 Не оставляйте этот файл на недоверенной машине. Основной connector tunnel к
-`47471` management token не использует.
+`14771` management token не использует.
 
 Пароль автоматически блокируется по окончании TTL. Открытая SSH-сессия продолжает работать; новые входы перестают приниматься. Досрочное закрытие и проверка состояния:
 

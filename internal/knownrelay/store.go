@@ -73,37 +73,64 @@ func (store *Store) Path() string {
 	return store.path
 }
 
+func (store *Store) Pin(endpoint string) (string, bool, error) {
+	if err := validateEndpoint(endpoint); err != nil {
+		return "", false, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	pin, found := store.entries[endpoint]
+	return pin, found, nil
+}
+
 func (store *Store) Verify(endpoint string, certificateDER []byte, acceptReplacement bool) (Result, error) {
-	if strings.TrimSpace(endpoint) == "" || strings.ContainsAny(endpoint, " \t\r\n") {
-		return Result{}, errors.New("relay endpoint must be a non-empty value without whitespace")
+	if err := validateEndpoint(endpoint); err != nil {
+		return Result{}, err
 	}
 	if len(certificateDER) == 0 {
 		return Result{}, errors.New("relay certificate is empty")
 	}
-	pin := transport.FormatCertificatePin(certificateDER)
+	return store.TrustPin(endpoint, transport.FormatCertificatePin(certificateDER), acceptReplacement)
+}
+
+func (store *Store) TrustPin(endpoint, pin string, acceptReplacement bool) (Result, error) {
+	if err := validateEndpoint(endpoint); err != nil {
+		return Result{}, err
+	}
+	normalizedPin, err := transport.NormalizeCertificatePin(pin)
+	if err != nil {
+		return Result{}, err
+	}
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
 	knownPin, found := store.entries[endpoint]
-	if found && knownPin == pin {
-		return Result{Decision: Known, Pin: pin}, nil
+	if found && knownPin == normalizedPin {
+		return Result{Decision: Known, Pin: normalizedPin}, nil
 	}
 	if found && !acceptReplacement {
 		return Result{}, &CertificateChangedError{
 			Endpoint:    endpoint,
 			KnownPin:    knownPin,
-			ReceivedPin: pin,
+			ReceivedPin: normalizedPin,
 		}
 	}
-	if err := appendEntry(store.path, endpoint, pin); err != nil {
+	if err := appendEntry(store.path, endpoint, normalizedPin); err != nil {
 		return Result{}, err
 	}
-	store.entries[endpoint] = pin
+	store.entries[endpoint] = normalizedPin
 	if found {
-		return Result{Decision: Replaced, Pin: pin, PreviousPin: knownPin}, nil
+		return Result{Decision: Replaced, Pin: normalizedPin, PreviousPin: knownPin}, nil
 	}
-	return Result{Decision: Learned, Pin: pin}, nil
+	return Result{Decision: Learned, Pin: normalizedPin}, nil
+}
+
+func validateEndpoint(endpoint string) error {
+	if strings.TrimSpace(endpoint) == "" || strings.ContainsAny(endpoint, " \t\r\n") {
+		return errors.New("relay endpoint must be a non-empty value without whitespace")
+	}
+	return nil
 }
 
 func load(path string) (map[string]string, error) {

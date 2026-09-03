@@ -51,11 +51,12 @@ func runConnector(arguments []string) error {
 	}
 	flags := flag.NewFlagSet("ariadne-connector", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	relayURL := flags.String("relay", "http://127.0.0.1:47471", "node-plane relay address or URL (bare host defaults to quic://HOST:47471)")
+	relayURL := flags.String("relay", "http://127.0.0.1:14771", "node-plane relay address or URL (bare host probes ports 14771, 23771, and 47471)")
 	relaySSH := flags.String("relay-ssh", "", "reach node plane through OpenSSH (user@host or user@host:port)")
 	relayCertificatePin := flags.String("relay-cert-pin", "", "optional pre-provisioned SHA-256 pin of the relay TLS leaf certificate")
-	knownRelaysPath := flags.String("known-relays-file", defaultKnownRelaysPath, "TOFU relay certificate store")
-	acceptNewRelayCertificate := flags.Bool("accept-new-relay-certificate", false, "explicitly accept one changed relay certificate in the TOFU store")
+	pairingCode := flags.String("pairing-code", "", "one-time code from `ari pair` for first relay commissioning")
+	knownRelaysPath := flags.String("known-relays-file", defaultKnownRelaysPath, "persistent paired relay certificate store")
+	acceptNewRelayCertificate := flags.Bool("accept-new-relay-certificate", false, "explicitly accept one changed certificate for an already paired relay")
 	relayFallback := flags.String("relay-fallback", "auto", "WSS fallback for quic:// relay: auto, none, or an HTTPS/WSS URL")
 	alias := flags.String("alias", "", "reported human-readable label (defaults to the local hostname)")
 	identityPath := flags.String("identity", defaultIdentityPath, "persistent Ed25519 identity file")
@@ -110,9 +111,12 @@ func runConnector(arguments []string) error {
 		if *acceptNewRelayCertificate {
 			return errors.New("--accept-new-relay-certificate is not used with --relay-ssh")
 		}
+		if *pairingCode != "" {
+			return errors.New("--pairing-code is not used with --relay-ssh; SSH already authenticates the tunnel")
+		}
 		tunnel, err = sshtunnel.Start(runContext, sshtunnel.Config{
 			Destination:   *relaySSH,
-			RemoteAddress: "127.0.0.1:47471",
+			RemoteAddress: "127.0.0.1:14771",
 		})
 		if err != nil {
 			return err
@@ -120,12 +124,21 @@ func runConnector(arguments []string) error {
 		defer tunnel.Close()
 		*relayURL = tunnel.URL
 	}
+	nodeIdentity, created, err := identity.LoadOrCreate(*identityPath)
+	if err != nil {
+		return err
+	}
+	if created {
+		logger.Info("created node identity", "path", *identityPath, "node_id", nodeIdentity.NodeID())
+	}
 	relayTransport, err := configureRelayTransport(
 		*relayURL,
 		*relayFallback,
 		*relayCertificatePin,
 		*knownRelaysPath,
 		*acceptNewRelayCertificate,
+		*pairingCode,
+		nodeIdentity,
 		logger,
 	)
 	if err != nil {
@@ -138,13 +151,6 @@ func runConnector(arguments []string) error {
 	}
 	if tunnel != nil && relayTransport.dial != nil {
 		return errors.New("--relay-ssh cannot be combined with a QUIC relay URL")
-	}
-	nodeIdentity, created, err := identity.LoadOrCreate(*identityPath)
-	if err != nil {
-		return err
-	}
-	if created {
-		logger.Info("created node identity", "path", *identityPath, "node_id", nodeIdentity.NodeID())
 	}
 	instance, err := connector.New(connector.Config{
 		RelayURL:          relayTransport.url,
@@ -282,6 +288,7 @@ func validatePersistentArguments(arguments []string) error {
 	relay := flags.String("relay", "", "")
 	relaySSH := flags.String("relay-ssh", "", "")
 	flags.String("relay-cert-pin", "", "")
+	pairingCode := flags.String("pairing-code", "", "")
 	flags.String("known-relays-file", "", "")
 	acceptChangedCertificate := flags.Bool("accept-new-relay-certificate", false, "")
 	flags.String("relay-fallback", "", "")
@@ -313,6 +320,9 @@ func validatePersistentArguments(arguments []string) error {
 	}
 	if *acceptChangedCertificate {
 		return errors.New("--accept-new-relay-certificate is a one-time trust override and cannot be saved in autostart")
+	}
+	if *pairingCode != "" {
+		return errors.New("--pairing-code is one-time commissioning material and cannot be saved in autostart")
 	}
 	if *relay == "" && *relaySSH == "" {
 		return errors.New("saved connector options require --relay HOST or --relay-ssh USER@HOST")
@@ -425,24 +435,24 @@ only through requests received from the management plane.
 When --alias is omitted, the connector reports a normalized local hostname.
 
 Relay addresses:
-  HOST                 QUIC on the default port: quic://HOST:47471
+  HOST                 QUIC/WSS discovery on ports 14771, 23771, and 47471
   HOST:PORT            QUIC on an explicit port
-  quic://HOST[:PORT]   Explicit QUIC; WSS fallback is automatic by default
+  quic://HOST[:PORT]   QUIC; missing port uses discovery, WSS fallback is automatic
   https://HOST[:PORT]  WSS only
   http://HOST[:PORT]   Plaintext; allowed on loopback unless explicitly enabled
 
 Relay trust (direct QUIC/WSS):
-  On first use, the relay certificate fingerprint is stored in known_relays.
-  Later connections require the same fingerprint. A changed certificate is
-  rejected with both fingerprints in the error. After verifying the relay,
-  rerun once with --accept-new-relay-certificate to replace the stored value.
-  --relay-cert-pin bypasses TOFU and requires an exact pre-provisioned pin.
+  First use requires a short-lived code printed by ari pair. Pass that code
+  once with --pairing-code; PAKE authenticates the relay certificate, stores
+  its fingerprint in known_relays, closes the commissioning connection, and
+  reconnects with the saved pin. Later connections require that exact pin.
+  --relay-cert-pin uses an independently pre-provisioned pin instead.
 
 Examples:
-  ariadne-connector --relay relay.example
+  ariadne-connector --relay relay.example --pairing-code 12345678
   ariadne-connector --relay relay.example --alias workstation
   ariadne-connector --relay relay.example:48123 --alias workstation
-  ariadne-connector --relay https://relay.example:47471 --alias workstation
+  ariadne-connector --relay https://relay.example:14771 --alias workstation
   ariadne-connector --relay relay.example --accept-new-relay-certificate --alias workstation
   ariadne-connector --relay-ssh breakglass@relay.example:22061 --alias workstation
 

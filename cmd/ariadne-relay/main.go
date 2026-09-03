@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -41,7 +42,7 @@ func run() error {
 	managementListen := flags.String("management-listen", "127.0.0.1:8088", "loopback-only management HTTP listen address")
 	managementTLSCertificate := flags.String("management-tls-cert", "", "management-plane TLS certificate path")
 	managementTLSKey := flags.String("management-tls-key", "", "management-plane TLS private key path")
-	nodeListen := flags.String("node-listen", "127.0.0.1:47471", "connector-facing HTTP listen address")
+	nodeListen := flags.String("node-listen", "127.0.0.1:14771", "connector-facing HTTP listen address")
 	nodeLoopbackListen := flags.String("node-loopback-listen", "", "optional additional plaintext loopback node listener for SSH tunnels")
 	nodeQUICListen := flags.String("node-quic-listen", "", "optional connector-facing QUIC listen address")
 	nodeTLSCertificate := flags.String("node-tls-cert", "", "node-plane TLS certificate path")
@@ -49,6 +50,8 @@ func run() error {
 	allowInsecureManagementListen := flags.Bool("allow-insecure-management-listen", false, "allow plaintext management HTTP on a trusted non-loopback network")
 	managementTokenPath := flags.String("management-token-file", defaultManagementTokenPath, "management bearer token file (created with mode 0600 if absent)")
 	registryPath := flags.String("registry-file", defaultRegistryPath, "persistent node identity and alias registry file")
+	pairingTTL := flags.Duration("pairing-ttl", 5*time.Minute, "lifetime of a one-time relay pairing code")
+	maxPairingAttempts := flags.Int("max-pairing-attempts", 5, "maximum PAKE attempts per pairing code")
 	allowInsecureNodeListen := flags.Bool("allow-insecure-node-listen", false, "allow plaintext node plane on a non-loopback address")
 	verbose := flags.Bool("verbose", false, "enable debug logs")
 	showVersion := flags.Bool("version", false, "print version and exit")
@@ -70,6 +73,12 @@ func run() error {
 	}
 	if (*managementTLSCertificate == "") != (*managementTLSKey == "") {
 		return errors.New("--management-tls-cert and --management-tls-key must be provided together")
+	}
+	if *pairingTTL <= 0 {
+		return errors.New("--pairing-ttl must be positive")
+	}
+	if *maxPairingAttempts <= 0 {
+		return errors.New("--max-pairing-attempts must be positive")
 	}
 	if err := transport.ValidateListenAddress(
 		*managementListen,
@@ -115,6 +124,18 @@ func run() error {
 	relayConfig.Version = version
 	relayConfig.ManagementToken = managementToken
 	relayConfig.RegistryPath = *registryPath
+	relayConfig.PairingTTL = *pairingTTL
+	relayConfig.MaxPairingAttempts = *maxPairingAttempts
+	if *nodeTLSCertificate != "" {
+		certificate, err := tls.LoadX509KeyPair(*nodeTLSCertificate, *nodeTLSKey)
+		if err != nil {
+			return fmt.Errorf("load node TLS keypair: %w", err)
+		}
+		if len(certificate.Certificate) == 0 {
+			return errors.New("node TLS certificate chain is empty")
+		}
+		relayConfig.RelayCertificatePin = transport.FormatCertificatePin(certificate.Certificate[0])
+	}
 	relayServer, err := relay.New(relayConfig, logger)
 	if err != nil {
 		return err

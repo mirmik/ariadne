@@ -82,6 +82,26 @@ func (client *Client) Nodes(ctx context.Context) ([]wire.NodeInfo, error) {
 	return nodesResponse.Nodes, nil
 }
 
+func (client *Client) OpenPairing(ctx context.Context) (wire.PairingOpenResponse, error) {
+	request, err := client.request(ctx, http.MethodPost, "/v1/pairing", nil)
+	if err != nil {
+		return wire.PairingOpenResponse{}, err
+	}
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return wire.PairingOpenResponse{}, fmt.Errorf("open relay pairing: %w", err)
+	}
+	defer response.Body.Close()
+	if err := decodeHTTPError(response); err != nil {
+		return wire.PairingOpenResponse{}, err
+	}
+	var result wire.PairingOpenResponse
+	if err := decodeJSON(response.Body, &result); err != nil {
+		return wire.PairingOpenResponse{}, fmt.Errorf("decode relay pairing response: %w", err)
+	}
+	return result, nil
+}
+
 func (client *Client) Claim(ctx context.Context, nodeID, alias string) (wire.NodeInfo, error) {
 	if nodeID == "" || alias == "" {
 		return wire.NodeInfo{}, errors.New("node ID and alias are required")

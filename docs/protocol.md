@@ -4,8 +4,9 @@
 
 ## Transport и endpoints
 
-Node plane по умолчанию использует отдельный порт `47471`. Доступны два
-совместимых транспорта:
+Node plane рекомендует отдельный порт `14771`. Для короткого адреса без порта
+connector одновременно пробует фиксированный набор `14771`, `23771`, `47471`;
+последний сохранён для совместимости. Доступны два совместимых транспорта:
 
 - QUIC/TLS 1.3 с ALPN `ariadne/1` на UDP;
 - `GET /v1/connect` — постоянный WebSocket connector → relay на TCP;
@@ -13,6 +14,7 @@ Node plane по умолчанию использует отдельный по�
 
 Management plane по умолчанию слушает `127.0.0.1:8088`, требует отдельный bearer token и содержит:
 
+- `POST /v1/pairing` — открыть одноразовое commissioning-окно и получить pairing-код;
 - `GET /v1/nodes` — список online-узлов;
 - `POST /v1/nodes/{node_id}/claim` — назначение доверенного alias с management plane;
 - `POST /v1/nodes/{node_id}/revoke` — отзыв точной identity и освобождение alias;
@@ -27,9 +29,46 @@ Management plane по умолчанию слушает `127.0.0.1:8088`, тре
 
 Node plane не требует предварительно доставленного bearer token: connector доказывает владение своей Ed25519 identity во время handshake. Он не предоставляет endpoints для управления. Management plane использует отдельный случайный 256-bit bearer token; relay создаёт token-файл `0600`, а `ari` читает его локально. Этот административный credential не входит в node bootstrap. Публичный node plane использует QUIC/TLS или HTTPS/WSS.
 
-Для прямого доступа роутер может пробросить UDP и TCP одного внешнего порта на `47471`: connector принимает короткий `--relay HOST` как `quic://HOST:47471`, предпочитает QUIC и затем использует WSS fallback. `HOST:PORT` меняет порт, а полный URL явно выбирает transport. TLS identity relay проверяется по TOFU: первый сертификат для `host:port` сохраняется в пользовательском `known_relays`, последующие подключения требуют точного совпадения. Изменившийся сертификат блокируется; одноразовая замена требует `--accept-new-relay-certificate`. Для заранее подготовленной установки TOFU можно заменить точным публичным pin из `--relay-cert-pin`. Старый bootstrap через `ariadne-connector --relay-ssh breakglass@HOST[:PORT]` создаёт SSH local forward до relay `127.0.0.1:47471` и остаётся доступен как fallback для сетей без UDP. Management client `ari` обычно работает рядом с relay или через защищённый tunnel и должен иметь token-файл. Plaintext non-loopback listener требует явный insecure-флаг.
+Для прямого доступа роутер пробрасывает UDP и TCP одного выбранного node-порта. Connector принимает короткий `--relay HOST` или `quic://HOST` как запрос discovery по портам `14771`, `23771`, `47471`: кандидаты пробуются конкурентно, каждый сначала через QUIC, затем через WSS на том же порту. После первого успеха connector использует выбранный endpoint для последующих reconnect до перезапуска процесса. `HOST:PORT` и `quic://HOST:PORT` задают единственный endpoint без перебора, а полный HTTP(S)/WS(S) URL явно выбирает transport. Первое доверие TLS identity relay устанавливается через PAKE commissioning; неизвестный endpoint без `--pairing-code` отклоняется. После commissioning точный pin хранится в пользовательском `known_relays`, а изменившийся сертификат блокируется. Для заранее подготовленной установки PAKE можно заменить точным публичным pin из `--relay-cert-pin`. Старый bootstrap через `ariadne-connector --relay-ssh breakglass@HOST[:PORT]` создаёт SSH local forward до рекомендуемого relay endpoint `127.0.0.1:14771` и остаётся доступен как доверенный fallback для сетей без UDP. Management client `ari` обычно работает рядом с relay или через защищённый tunnel и должен иметь token-файл. Plaintext non-loopback listener требует явный insecure-флаг.
 
 Переданный connector alias является недоверенной подсказкой. В списке узлов он имеет `alias_claimed: false` и не участвует в lookup. Management plane может связать alias с точным `node_id` через `/claim`; только такой alias разрешено использовать как target. Identity, platform metadata, claim и revoke-state сохраняются relay в постоянном registry, а live presence остаётся в памяти. Поэтому тот же ключ восстанавливает alias после reconnect или перезапуска relay, а другой ключ не может занять alias offline-узла. `/revoke` закрывает живую сессию, освобождает alias и запрещает прежнему ключу регистрироваться снова.
+
+## Commissioning relay и connector
+
+Оператор открывает окно командой `ari pair` через аутентифицированный management
+plane. Relay генерирует равномерный восьмизначный код, локально создаёт для него
+OPAQUE record (RFC 9807), удаляет исходный код из своего состояния и возвращает
+его оператору. По умолчанию record живёт пять минут и допускает пять login
+попыток. Новый запрос `ari pair` заменяет предыдущее окно.
+
+Первый TLS-сеанс проверяет только наличие сертификата и TLS 1.3; доверие к
+предъявленному сертификату ещё не устанавливается. Внутри него выполняется:
+
+1. Connector создаёт OPAQUE `KE1` из pairing-кода и отправляет
+   `pairing.request` с `node_id`, Ed25519 public key и подписью
+   domain-separated transcript `node_id || public_key || KE1`.
+2. Relay проверяет соответствие `node_id` ключу и подпись, расходует одну
+   попытку и отвечает `pairing.response` с `KE2`.
+3. Connector проверяет server MAC внутри OPAQUE и отправляет
+   `pairing.confirm` с `KE3`.
+4. Relay проверяет client MAC, атомарно расходует pairing-окно и отвечает
+   `pairing.complete`.
+   Ответ содержит TLS certificate pin и HMAC от OPAQUE session secret,
+   `node_id` и pin.
+5. Connector проверяет HMAC, сохраняет pin для точного `host:port`, закрывает
+   commissioning-сеанс и обязательно создаёт новый TLS-сеанс с точным pin.
+
+Поэтому активный MITM может только ретранслировать PAKE или сорвать подключение:
+подменённый сертификат не совпадёт с pin, а pairing-код не раскрывается для
+offline-перебора. Один активный сеанс даёт атакующему одну online-попытку,
+ограниченную relay. Pairing-код является одноразовым credential и не сохраняется
+в autostart. `ari pair` выводит восемь цифр без разделителя; connector принимает
+как такую запись, так и вариант с необязательным дефисом после четвёртой цифры.
+Подпись `pairing.request` связывает PAKE с Ed25519 identity connector, но не
+является admission control: обычный подписанный `connector.hello` по-прежнему
+создаёт или обновляет запись registry, а management claim отдельно разрешает
+человекочитаемый alias. SSH/local bootstrap полагается на аутентификацию SSH и
+pairing-кода не требует.
 
 ## Регистрация connector
 

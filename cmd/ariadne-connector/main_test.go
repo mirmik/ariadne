@@ -70,6 +70,7 @@ func TestValidatePersistentArguments(t *testing.T) {
 		{name: "missing relay", arguments: []string{"--alias", "radio"}, contains: "require --relay"},
 		{name: "version", arguments: []string{"--version"}, contains: "cannot be saved"},
 		{name: "persistent trust override", arguments: []string{"--accept-new-relay-certificate"}, contains: "one-time"},
+		{name: "persistent pairing code", arguments: []string{"--relay", "relay.example", "--pairing-code", "1234-5678"}, contains: "one-time"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := validatePersistentArguments(test.arguments)

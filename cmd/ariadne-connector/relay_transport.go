@@ -16,14 +16,20 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/mirmik/ariadne/internal/connector"
+	"github.com/mirmik/ariadne/internal/identity"
 	"github.com/mirmik/ariadne/internal/knownrelay"
 	"github.com/mirmik/ariadne/internal/messageconn"
+	"github.com/mirmik/ariadne/internal/pairing"
 	"github.com/mirmik/ariadne/internal/quictransport"
 	"github.com/mirmik/ariadne/internal/transport"
 	"github.com/mirmik/ariadne/internal/wire"
 )
 
-const defaultNodePort = "47471"
+const defaultNodePort = "14771"
+
+// A portless QUIC relay address discovers one fixed endpoint from this list.
+// The first port is recommended; 47471 remains for existing deployments.
+var implicitNodePorts = [...]string{"14771", "23771", "47471"}
 
 type configuredRelayTransport struct {
 	url        string
@@ -31,7 +37,18 @@ type configuredRelayTransport struct {
 	dial       func(context.Context) (messageconn.Conn, error)
 }
 
-func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string, acceptNewCertificate bool, logger *slog.Logger) (configuredRelayTransport, error) {
+type relayDialCandidate struct {
+	endpoint string
+	dial     func(context.Context) (messageconn.Conn, error)
+}
+
+type relayDialResult struct {
+	connection messageconn.Conn
+	err        error
+	index      int
+}
+
+func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string, acceptNewCertificate bool, pairingCode string, nodeIdentity *identity.Identity, logger *slog.Logger) (configuredRelayTransport, error) {
 	normalizedURL, err := normalizeRelayURL(rawURL)
 	if err != nil {
 		return configuredRelayTransport{}, err
@@ -49,86 +66,263 @@ func configureRelayTransport(rawURL, fallbackValue, pin, knownRelaysPath string,
 			if acceptNewCertificate {
 				return configuredRelayTransport{}, errors.New("--accept-new-relay-certificate requires a TLS relay URL")
 			}
+			if pairingCode != "" {
+				return configuredRelayTransport{}, errors.New("--pairing-code requires a TLS relay URL")
+			}
 			return result, nil
 		}
-		trust, err := newRelayCertificateTrust(pin, knownRelaysPath, acceptNewCertificate, logger)
+		trust, err := newRelayCertificateTrust(pin, knownRelaysPath, acceptNewCertificate, pairingCode, nodeIdentity, logger)
 		if err != nil {
 			return configuredRelayTransport{}, err
 		}
-		tlsConfig, err := trust.tlsConfig(parsed, "443")
+		connectorURL, err := connector.ConnectorURL(normalizedURL)
 		if err != nil {
 			return configuredRelayTransport{}, err
 		}
-		result.httpClient = tlsHTTPClient(tlsConfig)
+		result.dial = func(ctx context.Context) (messageconn.Conn, error) {
+			tlsConfig, endpoint, err := trust.tlsConfig(parsed, "443")
+			if err != nil {
+				return nil, err
+			}
+			connection, err := dialWebSocketEndpoint(ctx, connectorURL, tlsHTTPClient(tlsConfig))
+			if err != nil {
+				return nil, err
+			}
+			if !trust.pairingEnabled() {
+				return connection, nil
+			}
+			return trust.pairAndRedial(ctx, connection, endpoint, parsed.Hostname(), func(config *tls.Config) (messageconn.Conn, error) {
+				return dialWebSocketEndpoint(ctx, connectorURL, tlsHTTPClient(config))
+			})
+		}
 		return result, nil
 	}
 
 	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return configuredRelayTransport{}, errors.New("QUIC relay URL must contain only a host and optional port")
 	}
-	address := parsed.Host
-	if parsed.Port() == "" {
-		address = net.JoinHostPort(parsed.Hostname(), defaultNodePort)
-	}
-	trust, err := newRelayCertificateTrust(pin, knownRelaysPath, acceptNewCertificate, logger)
+	trust, err := newRelayCertificateTrust(pin, knownRelaysPath, acceptNewCertificate, pairingCode, nodeIdentity, logger)
 	if err != nil {
 		return configuredRelayTransport{}, err
 	}
-	tlsConfig, err := trust.tlsConfig(parsed, defaultNodePort)
-	if err != nil {
-		return configuredRelayTransport{}, err
-	}
+	endpoints := quicRelayEndpoints(rawURL, parsed)
+	candidates := make([]relayDialCandidate, 0, len(endpoints))
+	for index, endpoint := range endpoints {
+		candidateFallback := fallbackValue
+		if index > 0 && explicitFallback(candidateFallback) {
+			candidateFallback = "none"
+		}
+		fallbackURL, err := resolveFallbackURL(endpoint, candidateFallback)
+		if err != nil {
+			return configuredRelayTransport{}, err
+		}
+		var fallbackParsed *url.URL
+		if fallbackURL != "" {
+			if err := transport.ValidateRelayURL(fallbackURL, false); err != nil {
+				return configuredRelayTransport{}, fmt.Errorf("relay fallback: %w", err)
+			}
+			fallbackParsed, err = url.Parse(fallbackURL)
+			if err != nil {
+				return configuredRelayTransport{}, fmt.Errorf("parse relay fallback URL: %w", err)
+			}
+			fallbackURL, err = connector.ConnectorURL(fallbackURL)
+			if err != nil {
+				return configuredRelayTransport{}, err
+			}
+		}
 
-	fallbackURL, err := resolveFallbackURL(parsed, fallbackValue)
-	if err != nil {
-		return configuredRelayTransport{}, err
-	}
-	var fallbackHTTPClient *http.Client
-	if fallbackURL != "" {
-		if err := transport.ValidateRelayURL(fallbackURL, false); err != nil {
-			return configuredRelayTransport{}, fmt.Errorf("relay fallback: %w", err)
-		}
-		fallbackParsed, err := url.Parse(fallbackURL)
-		if err != nil {
-			return configuredRelayTransport{}, fmt.Errorf("parse relay fallback URL: %w", err)
-		}
-		fallbackTLSConfig, err := trust.tlsConfig(fallbackParsed, "443")
-		if err != nil {
-			return configuredRelayTransport{}, err
-		}
-		fallbackHTTPClient = tlsHTTPClient(fallbackTLSConfig)
-		fallbackURL, err = connector.ConnectorURL(fallbackURL)
-		if err != nil {
-			return configuredRelayTransport{}, err
-		}
+		address := endpoint.Host
+		candidateEndpoint := endpoint
+		candidateFallbackURL := fallbackURL
+		candidateFallbackParsed := fallbackParsed
+		candidates = append(candidates, relayDialCandidate{
+			endpoint: address,
+			dial: func(ctx context.Context) (messageconn.Conn, error) {
+				tlsConfig, canonicalEndpoint, err := trust.tlsConfig(candidateEndpoint, defaultNodePort)
+				if err != nil {
+					return nil, err
+				}
+				var fallbackHTTPClient *http.Client
+				if candidateFallbackParsed != nil {
+					fallbackTLSConfig, fallbackEndpoint, err := trust.tlsConfig(candidateFallbackParsed, "443")
+					if err != nil {
+						return nil, err
+					}
+					if trust.pairingEnabled() && fallbackEndpoint != canonicalEndpoint {
+						return nil, errors.New("pairing requires QUIC and WSS fallback to use the same host and port")
+					}
+					fallbackHTTPClient = tlsHTTPClient(fallbackTLSConfig)
+				}
+				connection, err := dialRelayEndpoint(ctx, address, tlsConfig, candidateFallbackURL, fallbackHTTPClient, logger)
+				if err != nil {
+					return nil, err
+				}
+				if !trust.pairingEnabled() {
+					return connection, nil
+				}
+				return trust.pairAndRedial(ctx, connection, canonicalEndpoint, candidateEndpoint.Hostname(), func(config *tls.Config) (messageconn.Conn, error) {
+					var pinnedFallbackClient *http.Client
+					if candidateFallbackParsed != nil {
+						pinnedFallbackClient = tlsHTTPClient(config.Clone())
+					}
+					return dialRelayEndpoint(ctx, address, config, candidateFallbackURL, pinnedFallbackClient, logger)
+				})
+			},
+		})
 	}
 
 	return configuredRelayTransport{
-		url: normalizedURL,
-		dial: func(ctx context.Context) (messageconn.Conn, error) {
-			quicContext, cancel := context.WithTimeout(ctx, 4*time.Second)
-			connection, quicErr := quictransport.Dial(quicContext, address, tlsConfig)
-			cancel()
-			if quicErr == nil {
-				return connection, nil
-			}
-			if fallbackURL == "" {
-				return nil, quicErr
-			}
-			if logger != nil {
-				logger.Warn("QUIC relay unavailable; trying WSS fallback", "error", quicErr, "fallback", fallbackURL)
-			}
-			websocketConnection, _, websocketErr := websocket.Dial(ctx, fallbackURL, &websocket.DialOptions{
-				HTTPClient:      fallbackHTTPClient,
-				CompressionMode: websocket.CompressionDisabled,
-			})
-			if websocketErr != nil {
-				return nil, errors.Join(quicErr, fmt.Errorf("connect WSS fallback: %w", websocketErr))
-			}
-			websocketConnection.SetReadLimit(wire.MaxControlMessageSize)
-			return messageconn.WebSocket{Conn: websocketConnection}, nil
-		},
+		url:  normalizedURL,
+		dial: stickyRelayCandidateDialer(candidates, logger),
 	}, nil
+}
+
+func quicRelayEndpoints(rawURL string, relay *url.URL) []*url.URL {
+	ports := []string{relay.Port()}
+	if !relayInputHasExplicitPort(rawURL) {
+		ports = implicitNodePorts[:]
+	}
+	endpoints := make([]*url.URL, 0, len(ports))
+	for _, port := range ports {
+		endpoint := *relay
+		endpoint.Host = net.JoinHostPort(relay.Hostname(), port)
+		endpoints = append(endpoints, &endpoint)
+	}
+	return endpoints
+}
+
+func relayInputHasExplicitPort(value string) bool {
+	value = strings.TrimSpace(value)
+	if strings.Contains(value, "://") {
+		parsed, err := url.Parse(value)
+		return err == nil && parsed.Port() != ""
+	}
+	if _, port, err := net.SplitHostPort(value); err == nil {
+		return port != ""
+	}
+	return false
+}
+
+func explicitFallback(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto", "none":
+		return false
+	default:
+		return true
+	}
+}
+
+func stickyRelayCandidateDialer(candidates []relayDialCandidate, logger *slog.Logger) func(context.Context) (messageconn.Conn, error) {
+	var selectedMu sync.Mutex
+	selected := -1
+	return func(ctx context.Context) (messageconn.Conn, error) {
+		selectedMu.Lock()
+		selectedCandidate := selected
+		selectedMu.Unlock()
+		if selectedCandidate >= 0 {
+			return candidates[selectedCandidate].dial(ctx)
+		}
+
+		connection, winner, err := dialRelayCandidates(ctx, candidates)
+		if err != nil {
+			return nil, err
+		}
+		selectedMu.Lock()
+		if selected < 0 {
+			selected = winner
+		}
+		selectedMu.Unlock()
+		if logger != nil && len(candidates) > 1 {
+			logger.Info("selected relay endpoint", "endpoint", candidates[winner].endpoint)
+		}
+		return connection, nil
+	}
+}
+
+func dialRelayCandidates(ctx context.Context, candidates []relayDialCandidate) (messageconn.Conn, int, error) {
+	if len(candidates) == 0 {
+		return nil, -1, errors.New("relay has no connection candidates")
+	}
+	if len(candidates) == 1 {
+		connection, err := candidates[0].dial(ctx)
+		return connection, 0, err
+	}
+
+	dialContext, cancel := context.WithCancel(ctx)
+	results := make(chan relayDialResult, len(candidates))
+	for index, candidate := range candidates {
+		index := index
+		candidate := candidate
+		go func() {
+			connection, err := candidate.dial(dialContext)
+			if err != nil {
+				err = fmt.Errorf("%s: %w", candidate.endpoint, err)
+			}
+			results <- relayDialResult{connection: connection, err: err, index: index}
+		}()
+	}
+
+	errorsByCandidate := make([]error, len(candidates))
+	remaining := len(candidates)
+	for remaining > 0 {
+		select {
+		case result := <-results:
+			remaining--
+			if result.err == nil {
+				cancel()
+				go closeRelayDialLosers(results, remaining)
+				return result.connection, result.index, nil
+			}
+			errorsByCandidate[result.index] = result.err
+		case <-ctx.Done():
+			cancel()
+			go closeRelayDialLosers(results, remaining)
+			return nil, -1, ctx.Err()
+		}
+	}
+	cancel()
+	return nil, -1, errors.Join(errorsByCandidate...)
+}
+
+func closeRelayDialLosers(results <-chan relayDialResult, remaining int) {
+	for range remaining {
+		result := <-results
+		if result.connection != nil {
+			result.connection.CloseNow()
+		}
+	}
+}
+
+func dialRelayEndpoint(ctx context.Context, address string, tlsConfig *tls.Config, fallbackURL string, fallbackHTTPClient *http.Client, logger *slog.Logger) (messageconn.Conn, error) {
+	quicContext, cancel := context.WithTimeout(ctx, 4*time.Second)
+	connection, quicErr := quictransport.Dial(quicContext, address, tlsConfig)
+	cancel()
+	if quicErr == nil {
+		return connection, nil
+	}
+	if fallbackURL == "" {
+		return nil, quicErr
+	}
+	if logger != nil {
+		logger.Warn("QUIC relay unavailable; trying WSS fallback", "error", quicErr, "fallback", fallbackURL)
+	}
+	websocketConnection, websocketErr := dialWebSocketEndpoint(ctx, fallbackURL, fallbackHTTPClient)
+	if websocketErr != nil {
+		return nil, errors.Join(quicErr, fmt.Errorf("connect WSS fallback: %w", websocketErr))
+	}
+	return websocketConnection, nil
+}
+
+func dialWebSocketEndpoint(ctx context.Context, endpoint string, httpClient *http.Client) (messageconn.Conn, error) {
+	connection, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
+		HTTPClient:      httpClient,
+		CompressionMode: websocket.CompressionDisabled,
+	})
+	if err != nil {
+		return nil, err
+	}
+	connection.SetReadLimit(wire.MaxControlMessageSize)
+	return messageconn.WebSocket{Conn: connection}, nil
 }
 
 func normalizeRelayURL(value string) (string, error) {
@@ -166,16 +360,32 @@ type relayCertificateTrust struct {
 	pin                  string
 	store                *knownrelay.Store
 	acceptNewCertificate bool
+	pairingCode          string
+	nodeIdentity         *identity.Identity
 	logger               *slog.Logger
 	mu                   sync.Mutex
+	observedPins         map[string]string
 }
 
-func newRelayCertificateTrust(pin, knownRelaysPath string, acceptNewCertificate bool, logger *slog.Logger) (*relayCertificateTrust, error) {
+func newRelayCertificateTrust(pin, knownRelaysPath string, acceptNewCertificate bool, pairingCode string, nodeIdentity *identity.Identity, logger *slog.Logger) (*relayCertificateTrust, error) {
 	if pin != "" {
 		if acceptNewCertificate {
 			return nil, errors.New("--relay-cert-pin and --accept-new-relay-certificate cannot be combined")
 		}
-		return &relayCertificateTrust{pin: pin, logger: logger}, nil
+		if pairingCode != "" {
+			return nil, errors.New("--relay-cert-pin and --pairing-code cannot be combined")
+		}
+		normalizedPin, err := transport.NormalizeCertificatePin(pin)
+		if err != nil {
+			return nil, err
+		}
+		return &relayCertificateTrust{pin: normalizedPin, logger: logger}, nil
+	}
+	if pairingCode != "" && acceptNewCertificate {
+		return nil, errors.New("--pairing-code and --accept-new-relay-certificate cannot be combined")
+	}
+	if pairingCode != "" && nodeIdentity == nil {
+		return nil, errors.New("connector identity is required for relay pairing")
 	}
 	if knownRelaysPath == "" {
 		return nil, errors.New("known relays file path is empty")
@@ -187,19 +397,49 @@ func newRelayCertificateTrust(pin, knownRelaysPath string, acceptNewCertificate 
 	return &relayCertificateTrust{
 		store:                store,
 		acceptNewCertificate: acceptNewCertificate,
+		pairingCode:          pairingCode,
+		nodeIdentity:         nodeIdentity,
 		logger:               logger,
+		observedPins:         make(map[string]string),
 	}, nil
 }
 
-func (trust *relayCertificateTrust) tlsConfig(relayURL *url.URL, defaultPort string) (*tls.Config, error) {
-	if trust.pin != "" {
-		return transport.ClientTLSConfig(relayURL.Hostname(), trust.pin)
-	}
+func (trust *relayCertificateTrust) pairingEnabled() bool {
+	trust.mu.Lock()
+	defer trust.mu.Unlock()
+	return trust.pairingCode != ""
+}
+
+func (trust *relayCertificateTrust) tlsConfig(relayURL *url.URL, defaultPort string) (*tls.Config, string, error) {
 	endpoint, err := canonicalRelayEndpoint(relayURL, defaultPort)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return transport.ClientTLSConfigWithLeafVerifier(relayURL.Hostname(), func(certificateDER []byte) error {
+	if trust.pin != "" {
+		config, err := transport.ClientTLSConfig(relayURL.Hostname(), trust.pin)
+		return config, endpoint, err
+	}
+	if trust.pairingEnabled() {
+		config := transport.ClientTLSConfigWithLeafVerifier(relayURL.Hostname(), func(certificateDER []byte) error {
+			trust.mu.Lock()
+			trust.observedPins[endpoint] = transport.FormatCertificatePin(certificateDER)
+			trust.mu.Unlock()
+			return nil
+		})
+		return config, endpoint, nil
+	}
+	knownPin, found, err := trust.store.Pin(endpoint)
+	if err != nil {
+		return nil, "", err
+	}
+	if !found {
+		return nil, "", fmt.Errorf("relay %s is not paired; run `ari pair` on the relay and reconnect with --pairing-code CODE", endpoint)
+	}
+	if !trust.acceptNewCertificate {
+		config, err := transport.ClientTLSConfig(relayURL.Hostname(), knownPin)
+		return config, endpoint, err
+	}
+	config := transport.ClientTLSConfigWithLeafVerifier(relayURL.Hostname(), func(certificateDER []byte) error {
 		trust.mu.Lock()
 		defer trust.mu.Unlock()
 		acceptReplacement := trust.acceptNewCertificate
@@ -225,7 +465,45 @@ func (trust *relayCertificateTrust) tlsConfig(relayURL *url.URL, defaultPort str
 			}
 		}
 		return nil
-	}), nil
+	})
+	return config, endpoint, nil
+}
+
+func (trust *relayCertificateTrust) pairAndRedial(
+	ctx context.Context,
+	connection messageconn.Conn,
+	endpoint string,
+	serverName string,
+	redial func(*tls.Config) (messageconn.Conn, error),
+) (messageconn.Conn, error) {
+	trust.mu.Lock()
+	pairingCode := trust.pairingCode
+	nodeIdentity := trust.nodeIdentity
+	trust.mu.Unlock()
+	pairedPin, err := pairing.PairRelay(ctx, connection, pairingCode, nodeIdentity)
+	connection.CloseNow()
+	if err != nil {
+		return nil, err
+	}
+	result, err := trust.store.TrustPin(endpoint, pairedPin, true)
+	if err != nil {
+		return nil, fmt.Errorf("save paired relay identity: %w", err)
+	}
+	trust.mu.Lock()
+	observedPin := trust.observedPins[endpoint]
+	trust.pairingCode = ""
+	trust.mu.Unlock()
+	if trust.logger != nil {
+		trust.logger.Info("paired relay identity", "endpoint", endpoint, "certificate_pin", result.Pin, "known_relays_file", trust.store.Path())
+		if observedPin != "" && observedPin != result.Pin {
+			trust.logger.Warn("pairing detected an intercepting TLS certificate; reconnecting only to the authenticated relay identity", "endpoint", endpoint, "presented_certificate_pin", observedPin, "authenticated_certificate_pin", result.Pin)
+		}
+	}
+	pinnedConfig, err := transport.ClientTLSConfig(serverName, result.Pin)
+	if err != nil {
+		return nil, err
+	}
+	return redial(pinnedConfig)
 }
 
 func canonicalRelayEndpoint(relayURL *url.URL, defaultPort string) (string, error) {

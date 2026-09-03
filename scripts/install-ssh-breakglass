@@ -162,7 +162,7 @@ for expected_setting in \
     "kbdinteractiveauthentication no" \
     "pubkeyauthentication no" \
     "allowtcpforwarding local" \
-    "permitopen 127.0.0.1:47471 127.0.0.1:8088"; do
+    "permitopen 127.0.0.1:14771 127.0.0.1:23771 127.0.0.1:47471 127.0.0.1:8088"; do
     if ! grep -qx -- "${expected_setting}" <<<"${effective_config}"; then
         echo "effective SSH configuration is missing: ${expected_setting}" >&2
         echo "restoring the previous drop-in" >&2
