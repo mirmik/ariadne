@@ -1,6 +1,6 @@
 interface:
   display_name: "Ariadne Remote"
-  short_description: "Work on remote nodes through Ariadne MCP"
+  short_description: "Operate explicitly selected Ariadne nodes"
   default_prompt: "Use $ariadne-remote to inspect or operate the requested Ariadne node."
 
 dependencies:

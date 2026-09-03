@@ -1,9 +1,25 @@
 ---
 name: ariadne-remote
-description: Inspect, diagnose, build, and operate computers connected through the Ariadne MCP server. Use when work targets an Ariadne node or a remote Windows, Linux, or Android machine reached through Ariadne; do not use for ordinary local commands or generic SSH administration.
+description: Inspect and operate computers through the Ariadne MCP server only when the user explicitly requests Ariadne or the target is already established as an Ariadne node. Do not use it for a generic remote machine, an SSH destination, or merely because the Ariadne MCP server is installed; prefer the user's existing SSH path.
 ---
 
 # Ariadne Remote
+
+## Routing boundary
+
+Choose Ariadne only after the request or established context has selected it as
+the transport. The mere presence of this skill or the Ariadne MCP server, a
+remote Windows/Linux/Android target, or a need for remote access is not a reason
+to probe Ariadne.
+
+- If the user provides an SSH host, SSH config alias, SSH command, or otherwise
+  has working direct SSH access, use SSH. Do not call `ariadne_nodes` first and
+  do not replace SSH with Ariadne unless the user asks for that change.
+- Do not call `ariadne_nodes` just to discover whether an unrelated remote
+  machine might also be reachable through Ariadne.
+- If Ariadne was selected and `ariadne_nodes` returns no suitable nodes, report
+  that Ariadne currently has no matching node. Do not keep retrying or treat
+  Ariadne as a fallback transport for an SSH target.
 
 Use the Ariadne MCP tools directly. Do not invoke the `ari` CLI unless the user is explicitly diagnosing the MCP integration itself.
 
