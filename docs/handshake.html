@@ -1,0 +1,904 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Наглядное объяснение commissioning и handshake между Ariadne connector и relay.">
+  <title>Ariadne — handshake простыми словами</title>
+  <style>
+    :root {
+      --page: #f5f2ea;
+      --paper: #fffdf8;
+      --ink: #20231f;
+      --muted: #61675f;
+      --line: #d8d5cb;
+      --accent: #246b5a;
+      --accent-soft: #dceee8;
+      --connector: #315c9c;
+      --connector-soft: #e2ebf8;
+      --relay: #8a4c21;
+      --relay-soft: #f6e7dc;
+      --danger: #9a3535;
+      --danger-soft: #f8e2e0;
+      --warning: #7a5b12;
+      --warning-soft: #f7edc9;
+      --shadow: 0 18px 50px rgba(45, 42, 32, 0.09);
+      --radius: 20px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 1.5rem;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 0%, rgba(36, 107, 90, 0.13), transparent 29rem),
+        radial-gradient(circle at 95% 12%, rgba(138, 76, 33, 0.11), transparent 27rem),
+        var(--page);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.62;
+    }
+
+    a { color: var(--accent); }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    code {
+      padding: 0.12rem 0.34rem;
+      border-radius: 0.35rem;
+      background: color-mix(in srgb, var(--accent-soft) 65%, transparent);
+      font-size: 0.92em;
+    }
+
+    .wrap {
+      width: min(1120px, calc(100% - 2rem));
+      margin: 0 auto;
+    }
+
+    header {
+      padding: 5.5rem 0 3.25rem;
+    }
+
+    .eyebrow {
+      margin: 0 0 0.75rem;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 {
+      margin-top: 0;
+      line-height: 1.14;
+      letter-spacing: -0.025em;
+    }
+
+    h1 {
+      max-width: 850px;
+      margin-bottom: 1.1rem;
+      font-size: clamp(2.5rem, 7vw, 5.5rem);
+      font-weight: 780;
+    }
+
+    h2 { font-size: clamp(1.75rem, 4vw, 2.65rem); }
+    h3 { font-size: 1.16rem; }
+
+    .lead {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+      font-size: clamp(1.08rem, 2vw, 1.32rem);
+    }
+
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 1.75rem;
+    }
+
+    .badge {
+      padding: 0.44rem 0.72rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--paper) 86%, transparent);
+      color: var(--muted);
+      font-size: 0.86rem;
+      font-weight: 700;
+    }
+
+    nav {
+      position: sticky;
+      z-index: 10;
+      top: 0;
+      border-block: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+      background: color-mix(in srgb, var(--page) 88%, transparent);
+      backdrop-filter: blur(14px);
+    }
+
+    nav .wrap {
+      display: flex;
+      gap: 1.2rem;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    nav a {
+      flex: 0 0 auto;
+      padding: 0.8rem 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    nav a:hover { color: var(--accent); }
+
+    main { padding: 3.2rem 0 6rem; }
+    section { margin-bottom: 5rem; }
+    section > p { max-width: 800px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 1rem;
+    }
+
+    .card {
+      padding: 1.35rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: color-mix(in srgb, var(--paper) 92%, transparent);
+      box-shadow: var(--shadow);
+    }
+
+    .card p:last-child { margin-bottom: 0; }
+    .third { grid-column: span 4; }
+    .half { grid-column: span 6; }
+
+    .number {
+      display: inline-grid;
+      width: 2.1rem;
+      height: 2.1rem;
+      margin-bottom: 0.75rem;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--accent);
+      color: white;
+      font-size: 0.9rem;
+      font-weight: 800;
+    }
+
+    .big-idea {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 1rem;
+      align-items: stretch;
+      margin-top: 1.5rem;
+    }
+
+    .identity-card {
+      padding: 1.55rem;
+      border-radius: var(--radius);
+    }
+
+    .identity-card.connector {
+      border: 1px solid color-mix(in srgb, var(--connector) 32%, var(--line));
+      background: var(--connector-soft);
+    }
+
+    .identity-card.relay {
+      border: 1px solid color-mix(in srgb, var(--relay) 32%, var(--line));
+      background: var(--relay-soft);
+    }
+
+    .identity-card .who {
+      margin-bottom: 0.5rem;
+      font-size: 0.8rem;
+      font-weight: 850;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .connector .who { color: var(--connector); }
+    .relay .who { color: var(--relay); }
+
+    .double-arrow {
+      display: grid;
+      min-width: 7rem;
+      place-items: center;
+      color: var(--muted);
+      font-weight: 750;
+      text-align: center;
+    }
+
+    .double-arrow span {
+      display: block;
+      font-size: 2rem;
+      line-height: 1;
+    }
+
+    .callout {
+      margin: 1.5rem 0;
+      padding: 1.15rem 1.3rem;
+      border-left: 5px solid var(--accent);
+      border-radius: 0 var(--radius) var(--radius) 0;
+      background: var(--accent-soft);
+    }
+
+    .callout.warning {
+      border-color: var(--warning);
+      background: var(--warning-soft);
+    }
+
+    .callout strong { display: block; margin-bottom: 0.2rem; }
+
+    .terminal {
+      margin: 1.4rem 0;
+      overflow-x: auto;
+      border: 1px solid #29352f;
+      border-radius: 16px;
+      background: #17201c;
+      color: #e9f3ee;
+      box-shadow: var(--shadow);
+    }
+
+    .terminal::before {
+      display: block;
+      padding: 0.55rem 1rem;
+      border-bottom: 1px solid #34423b;
+      color: #91a69b;
+      content: "●  ●  ●";
+      font-size: 0.72rem;
+      letter-spacing: 0.28rem;
+    }
+
+    .terminal pre {
+      margin: 0;
+      padding: 1.1rem 1.2rem 1.25rem;
+      font-size: 0.91rem;
+      line-height: 1.7;
+    }
+
+    .comment { color: #8fa499; }
+    .code-value { color: #f4ce78; }
+
+    .sequence {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(150px, 1fr) minmax(280px, 2.2fr) minmax(150px, 1fr);
+      gap: 0.75rem 1rem;
+      margin-top: 1.5rem;
+      padding: 1.35rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .lane-title {
+      position: sticky;
+      top: 3rem;
+      z-index: 2;
+      padding: 0.62rem 0.8rem;
+      border-radius: 12px;
+      font-size: 0.8rem;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .lane-title.connector { background: var(--connector-soft); color: var(--connector); }
+    .lane-title.relay { background: var(--relay-soft); color: var(--relay); }
+    .lane-title.network { background: var(--accent-soft); color: var(--accent); }
+
+    .event {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(150px, 1fr) minmax(280px, 2.2fr) minmax(150px, 1fr);
+      gap: 1rem;
+      align-items: center;
+      min-height: 5.2rem;
+      border-top: 1px dashed var(--line);
+    }
+
+    .event.first { border-top: 0; }
+
+    .endpoint {
+      padding: 0.75rem;
+      border-radius: 12px;
+      font-size: 0.9rem;
+    }
+
+    .endpoint.from-connector { background: var(--connector-soft); }
+    .endpoint.from-relay { background: var(--relay-soft); }
+    .endpoint.empty { color: var(--muted); text-align: center; }
+
+    .message {
+      position: relative;
+      margin: 0 0.3rem;
+      padding: 0.45rem 0.7rem;
+      border-block: 2px solid var(--accent);
+      color: var(--muted);
+      font-size: 0.83rem;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .message.right::after,
+    .message.left::before {
+      position: absolute;
+      top: 50%;
+      width: 0;
+      height: 0;
+      border-top: 7px solid transparent;
+      border-bottom: 7px solid transparent;
+      content: "";
+      transform: translateY(-50%);
+    }
+
+    .message.right::after {
+      right: -2px;
+      border-left: 10px solid var(--accent);
+    }
+
+    .message.left::before {
+      left: -2px;
+      border-right: 10px solid var(--accent);
+    }
+
+    .step-note {
+      grid-column: 1 / -1;
+      margin: -0.35rem 0 0.55rem;
+      padding-left: 0.75rem;
+      border-left: 3px solid var(--line);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .phase-break {
+      grid-column: 1 / -1;
+      margin: 0.35rem 0;
+      padding: 0.7rem;
+      border-radius: 12px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.84rem;
+      font-weight: 850;
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .plain-list {
+      padding-left: 1.25rem;
+    }
+
+    .plain-list li { margin: 0.65rem 0; }
+
+    .security-card {
+      grid-column: span 6;
+      position: relative;
+      padding-left: 4.1rem;
+    }
+
+    .security-card .icon {
+      position: absolute;
+      top: 1.25rem;
+      left: 1.25rem;
+      display: grid;
+      width: 2.25rem;
+      height: 2.25rem;
+      place-items: center;
+      border-radius: 12px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 900;
+    }
+
+    .formula {
+      margin: 1.3rem 0;
+      padding: 1.25rem;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--paper) 80%, var(--accent-soft));
+      font-size: clamp(0.82rem, 2vw, 1rem);
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .attack-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .attack-table th,
+    .attack-table td {
+      padding: 1rem;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    .attack-table th {
+      background: color-mix(in srgb, var(--accent-soft) 58%, var(--paper));
+      font-size: 0.8rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .attack-table tr:last-child td { border-bottom: 0; }
+    .status { font-weight: 850; }
+    .status.good { color: var(--accent); }
+    .status.partial { color: var(--warning); }
+    .status.limit { color: var(--danger); }
+
+    details {
+      margin-bottom: 0.75rem;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--paper);
+    }
+
+    summary {
+      padding: 1rem 1.1rem;
+      cursor: pointer;
+      font-weight: 760;
+    }
+
+    details p { margin: 0; padding: 0 1.1rem 1.1rem; color: var(--muted); }
+
+    .limits {
+      border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+      background: var(--danger-soft);
+    }
+
+    footer {
+      padding: 2.5rem 0 3.5rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 780px) {
+      header { padding-top: 3.6rem; }
+      .third, .half, .security-card { grid-column: 1 / -1; }
+      .big-idea { grid-template-columns: 1fr; }
+      .double-arrow { min-height: 4.5rem; }
+      .double-arrow span { transform: rotate(90deg); }
+      .sequence { display: block; }
+      .lane-title { display: inline-block; position: static; margin: 0 0.25rem 1rem 0; }
+      .event { display: block; padding: 1rem 0; }
+      .endpoint { margin: 0.45rem 0; }
+      .endpoint.empty { display: none; }
+      .message { margin: 0.7rem 0; }
+      .message.right::after, .message.left::before { display: none; }
+      .step-note, .phase-break { display: block; margin: 0.5rem 0; }
+      .attack-table, .attack-table tbody, .attack-table tr, .attack-table td { display: block; }
+      .attack-table thead { display: none; }
+      .attack-table tr { padding: 0.75rem; border-bottom: 1px solid var(--line); }
+      .attack-table td { padding: 0.4rem; border: 0; }
+      .attack-table td::before { display: block; color: var(--muted); content: attr(data-label); font-size: 0.72rem; font-weight: 800; text-transform: uppercase; }
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #121713;
+        --paper: #19201b;
+        --ink: #eef2ed;
+        --muted: #abb5ad;
+        --line: #364139;
+        --accent: #7cc5b1;
+        --accent-soft: #203b33;
+        --connector: #99bced;
+        --connector-soft: #22344d;
+        --relay: #e1a174;
+        --relay-soft: #442f22;
+        --danger: #ef9b9b;
+        --danger-soft: #452626;
+        --warning: #e3c66d;
+        --warning-soft: #403719;
+        --shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+      }
+    }
+
+    @media print {
+      :root { --page: white; --paper: white; --ink: black; --muted: #444; --shadow: none; }
+      nav { display: none; }
+      body { background: white; }
+      header { padding-top: 1rem; }
+      section { break-inside: avoid; margin-bottom: 2.4rem; }
+      .card, .sequence, .attack-table { box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <p class="eyebrow">Ariadne · справка без криптографического жаргона</p>
+    <h1>Как connector и relay узнают друг друга</h1>
+    <p class="lead">
+      Разбираем по шагам, что именно летит по сети, зачем нужен восьмизначный
+      pairing-код и почему человек посередине не может незаметно выдать себя за relay.
+    </p>
+    <div class="badges" aria-label="Основные свойства">
+      <span class="badge">OPAQUE PAKE</span>
+      <span class="badge">TLS 1.3</span>
+      <span class="badge">Ed25519</span>
+      <span class="badge">одноразовый код</span>
+      <span class="badge">certificate pinning</span>
+    </div>
+  </header>
+
+  <nav aria-label="Содержание">
+    <div class="wrap">
+      <a href="#idea">Главная идея</a>
+      <a href="#first-meeting">Первое знакомство</a>
+      <a href="#regular">Обычный вход</a>
+      <a href="#safety">Почему безопасно</a>
+      <a href="#attacks">Сценарии атак</a>
+      <a href="#limits">Границы защиты</a>
+      <a href="#faq">Вопросы</a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <section id="idea">
+      <p class="eyebrow">Сначала самое важное</p>
+      <h2>На самом деле handshake два</h2>
+      <p>
+        Они решают противоположные задачи. Первый выполняется один раз при знакомстве,
+        второй — при каждом соединении. Смешивать их не стоит.
+      </p>
+
+      <div class="big-idea">
+        <article class="identity-card connector">
+          <div class="who">Commissioning · один раз</div>
+          <h3>Connector проверяет relay</h3>
+          <p>
+            «Pairing-код совпал, значит я получил настоящий отпечаток сертификата relay.
+            Запомню его и больше не приму другой».
+          </p>
+        </article>
+        <div class="double-arrow" aria-hidden="true">
+          <span>⇄</span>
+          две стороны доверия
+        </div>
+        <article class="identity-card relay">
+          <div class="who">Регистрация · каждый раз</div>
+          <h3>Relay проверяет connector</h3>
+          <p>
+            «Connector подписал свежую случайную задачу тем же приватным ключом.
+            Значит это та же машина, а не запись старого разговора».
+          </p>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>Аналогия с первой встречей</strong>
+        Pairing-код — заранее известная обоим секретная фраза. После встречи connector
+        запоминает «лицо» relay — точный SHA-256 отпечаток его TLS-сертификата.
+        В следующие разы секретная фраза уже не нужна: достаточно сверить лицо.
+      </div>
+    </section>
+
+    <section id="first-meeting">
+      <p class="eyebrow">Часть 1</p>
+      <h2>Первое знакомство: commissioning</h2>
+      <p>
+        Оператор находится на relay или обращается к его закрытому management plane.
+        Он открывает короткое окно знакомства, переносит код на машину connector и
+        запускает единственный commissioning-сеанс.
+      </p>
+
+      <div class="terminal" aria-label="Пример команд">
+        <pre><span class="comment"># На relay: открыть окно знакомства</span>
+$ ari pair
+pairing code: <span class="code-value">12345678</span>
+expires: 2026-09-03T18:42:00+03:00 (5 attempts)
+
+<span class="comment"># На машине connector</span>
+$ ariadne-connector --relay relay.example --pairing-code <span class="code-value">12345678</span>
+
+<span class="comment"># Ввод с дефисом тоже допустим</span>
+$ ariadne-connector --relay relay.example --pairing-code <span class="code-value">1234-5678</span></pre>
+      </div>
+
+      <div class="grid">
+        <article class="card third">
+          <span class="number">1</span>
+          <h3>Relay создаёт код</h3>
+          <p>Ровно 8 случайных цифр. По умолчанию код живёт 5 минут и разрешает не более 5 попыток.</p>
+        </article>
+        <article class="card third">
+          <span class="number">2</span>
+          <h3>Relay оставляет verifier</h3>
+          <p>В памяти остаётся OPAQUE record, необходимый для проверки. Исходный код в состоянии relay не хранится.</p>
+        </article>
+        <article class="card third">
+          <span class="number">3</span>
+          <h3>Человек переносит код</h3>
+          <p>Это маленький доверенный канал между двумя машинами: глазами, голосом или другим подходящим способом.</p>
+        </article>
+      </div>
+
+      <h3 style="margin-top: 2.4rem">Что происходит по сети</h3>
+      <div class="sequence" aria-label="Последовательность commissioning">
+        <div class="lane-title connector">Connector</div>
+        <div class="lane-title network">Сеть</div>
+        <div class="lane-title relay">Relay</div>
+
+        <div class="event first">
+          <div class="endpoint from-connector"><strong>Открывает TLS 1.3</strong><br>Сертификат пока ещё не считается доверенным.</div>
+          <div class="message right">TLS connection →</div>
+          <div class="endpoint from-relay">Предъявляет TLS-сертификат.</div>
+        </div>
+        <p class="step-note">
+          На этом коротком этапе TLS шифрует транспорт, но identity сертификата будет
+          доказана не центром сертификации, а pairing-кодом и PAKE.
+        </p>
+
+        <div class="event">
+          <div class="endpoint from-connector">Из кода создаёт <strong>OPAQUE KE1</strong>. Добавляет свой node ID, публичный ключ и Ed25519-подпись.</div>
+          <div class="message right"><code>pairing.request</code> →</div>
+          <div class="endpoint from-relay">Проверяет подпись и соответствие node ID публичному ключу. Списывает одну попытку.</div>
+        </div>
+
+        <div class="event">
+          <div class="endpoint from-connector">Проверяет server MAC: ответ мог создать участник с правильным OPAQUE record.</div>
+          <div class="message left">← <code>pairing.response</code> · KE2</div>
+          <div class="endpoint from-relay">Строит OPAQUE KE2 из KE1 и verifier.</div>
+        </div>
+
+        <div class="event">
+          <div class="endpoint from-connector">Создаёт KE3. Обе стороны уже получили одинаковый секрет сеанса.</div>
+          <div class="message right"><code>pairing.confirm</code> · KE3 →</div>
+          <div class="endpoint from-relay">Проверяет client MAC. При успехе навсегда расходует pairing-код.</div>
+        </div>
+
+        <div class="event">
+          <div class="endpoint from-connector">Проверяет MAC ответа и получает доказанный certificate pin.</div>
+          <div class="message left">← <code>pairing.complete</code> · pin + MAC</div>
+          <div class="endpoint from-relay">Связывает секрет сеанса, node ID и отпечаток своего TLS-сертификата одним HMAC.</div>
+        </div>
+
+        <div class="phase-break">Критическая граница: временное соединение закрывается</div>
+
+        <div class="event">
+          <div class="endpoint from-connector"><strong>Сохраняет pin</strong> для точного <code>host:port</code> и открывает новое соединение.</div>
+          <div class="message right">новый TLS, только точный pin →</div>
+          <div class="endpoint from-relay">Доказывает identity уже самим сертификатом с сохранённым отпечатком.</div>
+        </div>
+      </div>
+
+      <div class="formula" aria-label="Формула привязки сертификата">
+        confirmation = HMAC(session secret, protocol label ∥ node ID ∥ relay certificate pin)
+      </div>
+      <p>
+        Эта формула означает: отпечаток сертификата нельзя незаметно заменить в последнем
+        сообщении. Подделывателю неизвестен общий секрет, поэтому правильный MAC он не создаст.
+      </p>
+    </section>
+
+    <section id="regular">
+      <p class="eyebrow">Часть 2</p>
+      <h2>Обычный handshake при каждом подключении</h2>
+      <p>
+        Pairing-код уже уничтожен и больше не нужен. Connector проверяет сохранённый pin
+        во время TLS, а затем relay проверяет постоянный Ed25519-ключ connector.
+      </p>
+
+      <div class="sequence" aria-label="Последовательность обычной регистрации">
+        <div class="lane-title connector">Connector</div>
+        <div class="lane-title network">Сеть</div>
+        <div class="lane-title relay">Relay</div>
+
+        <div class="event first">
+          <div class="endpoint from-connector">Показывает node ID, публичный ключ, alias, SSH host key, платформу и возможности.</div>
+          <div class="message right"><code>connector.hello</code> →</div>
+          <div class="endpoint from-relay">Проверяет, что node ID действительно получен из этого public key.</div>
+        </div>
+
+        <div class="event">
+          <div class="endpoint from-connector">Получает совершенно новую случайную задачу.</div>
+          <div class="message left">← <code>relay.challenge</code></div>
+          <div class="endpoint from-relay">Генерирует одноразовый случайный nonce.</div>
+        </div>
+
+        <div class="event">
+          <div class="endpoint from-connector">Подписывает challenge и <em>все</em> поля hello своим приватным Ed25519-ключом.</div>
+          <div class="message right"><code>connector.register</code> →</div>
+          <div class="endpoint from-relay">Проверяет подпись публичным ключом connector.</div>
+        </div>
+
+        <div class="event">
+          <div class="endpoint from-connector">С этого момента может обслуживать команды и потоки.</div>
+          <div class="message left">← <code>relay.registered</code></div>
+          <div class="endpoint from-relay">Регистрирует живую сессию и подтверждает вход.</div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>Приватный ключ никуда не отправляется</strong>
+        По сети идут только публичный ключ и подпись. По подписи можно проверить ответ,
+        но нельзя восстановить приватный ключ или создать новую корректную подпись.
+      </div>
+    </section>
+
+    <section id="safety">
+      <p class="eyebrow">Разбор защиты</p>
+      <h2>Почему эта схема безопаснее обычного TOFU</h2>
+      <p>
+        При классическом trust on first use первый увиденный сертификат автоматически
+        объявляется правильным. Если именно в этот момент рядом оказался MITM, мы можем
+        навсегда запомнить сертификат атакующего. Здесь первый сертификат сам по себе
+        не получает доверия.
+      </p>
+
+      <div class="grid">
+        <article class="card security-card">
+          <span class="icon">1</span>
+          <h3>Код не передаётся как пароль</h3>
+          <p>По сети идут сообщения OPAQUE. Перехваченный transcript не становится удобной базой для автономного перебора всех 100 миллионов кодов.</p>
+        </article>
+        <article class="card security-card">
+          <span class="icon">2</span>
+          <h3>Перебор ограничен relay</h3>
+          <p>Проверить догадку можно только активной попыткой против открытого окна. По умолчанию их пять, после чего окно закрывается.</p>
+        </article>
+        <article class="card security-card">
+          <span class="icon">3</span>
+          <h3>Код быстро протухает</h3>
+          <p>Окно живёт пять минут, успешный обмен расходует его сразу, а новый <code>ari pair</code> заменяет старое окно.</p>
+        </article>
+        <article class="card security-card">
+          <span class="icon">4</span>
+          <h3>Стороны подтверждают общий секрет</h3>
+          <p>Server MAC и client MAC не дают фальшивому relay или connector закончить обмен, не владея правильным материалом PAKE.</p>
+        </article>
+        <article class="card security-card">
+          <span class="icon">5</span>
+          <h3>Pin включён в подтверждение</h3>
+          <p>Отпечаток TLS-сертификата защищён HMAC общего секрета вместе с node ID и меткой протокола.</p>
+        </article>
+        <article class="card security-card">
+          <span class="icon">6</span>
+          <h3>После знакомства — чистый старт</h3>
+          <p>Connector не продолжает работу внутри временного TLS. Он закрывает его и подключается заново, уже требуя доказанный точный pin.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="attacks">
+      <p class="eyebrow">Практические сценарии</p>
+      <h2>Что сможет человек посередине</h2>
+      <div style="overflow-x: auto; padding: 0 1px 1.4rem">
+        <table class="attack-table">
+          <thead>
+            <tr>
+              <th>Сценарий</th>
+              <th>Что видит или делает атакующий</th>
+              <th>Результат</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Сценарий"><strong>Пассивное прослушивание</strong></td>
+              <td data-label="Действия">Наблюдает IP, порт, время и объём TLS-трафика, но не содержимое.</td>
+              <td data-label="Результат"><span class="status good">Содержимое защищено.</span> Сам pairing-код из записи трафика не извлекается.</td>
+            </tr>
+            <tr>
+              <td data-label="Сценарий"><strong>Фальшивый relay</strong></td>
+              <td data-label="Действия">Подсовывает свой TLS-сертификат и пытается ответить на KE1.</td>
+              <td data-label="Результат"><span class="status good">PAKE не завершается.</span> Фальшивка не создаст правильный server MAC.</td>
+            </tr>
+            <tr>
+              <td data-label="Сценарий"><strong>Прозрачный active MITM</strong></td>
+              <td data-label="Действия">Честно ретранслирует PAKE настоящему relay, пытаясь остаться между сторонами.</td>
+              <td data-label="Результат"><span class="status good">Получится pin настоящего relay.</span> После обязательного reconnect подменный сертификат будет отвергнут. Оставшись простым TCP/UDP-прокси, MITM видит лишь TLS ciphertext.</td>
+            </tr>
+            <tr>
+              <td data-label="Сценарий"><strong>Перебор кода</strong></td>
+              <td data-label="Действия">Отправляет догадки открытому relay.</td>
+              <td data-label="Результат"><span class="status partial">Не более пяти online-попыток</span> на стандартное окно, затем код перестаёт работать.</td>
+            </tr>
+            <tr>
+              <td data-label="Сценарий"><strong>Повтор старого handshake</strong></td>
+              <td data-label="Действия">Проигрывает ранее записанные hello, challenge и подпись connector.</td>
+              <td data-label="Результат"><span class="status good">Не сработает.</span> Relay каждый раз выдаёт новый случайный challenge.</td>
+            </tr>
+            <tr>
+              <td data-label="Сценарий"><strong>Подмена alias</strong></td>
+              <td data-label="Действия">Новая нода сообщает красивое имя существующей машины.</td>
+              <td data-label="Результат"><span class="status good">Не получает доверенное имя.</span> Alias становится адресуемым только после отдельного management claim.</td>
+            </tr>
+            <tr>
+              <td data-label="Сценарий"><strong>Отказ в обслуживании</strong></td>
+              <td data-label="Действия">Рвёт пакеты, блокирует порт или специально расходует попытки.</td>
+              <td data-label="Результат"><span class="status limit">Связь можно сорвать.</span> Криптография не способна заставить атакующего доставлять трафик.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="limits">
+      <p class="eyebrow">Без ложных обещаний</p>
+      <h2>Чего handshake не защищает</h2>
+      <div class="card limits">
+        <ul class="plain-list">
+          <li><strong>Украденный pairing-код.</strong> Если атакующий получит код и успеет использовать его раньше владельца, короткий код перестаёт быть секретом.</li>
+          <li><strong>Взломанная конечная машина.</strong> Malware на connector может украсть Ed25519 identity и trust store; взломанный relay контролирует собственный сервис и management plane.</li>
+          <li><strong>Подмена локальных файлов.</strong> Тот, кто уже может переписать <code>known_relays</code> от имени пользователя, находится внутри локальной границы доверия.</li>
+          <li><strong>DoS и метаданные.</strong> Нельзя скрыть сам факт соединения, IP-адреса, примерный объём трафика или гарантировать доставку через враждебную сеть.</li>
+          <li><strong>Авторизация новой ноды.</strong> Pairing доказывает identity relay для connector и связывает обмен с ключом connector, но не заменяет management claim и будущую ACL-модель.</li>
+        </ul>
+      </div>
+      <div class="callout warning">
+        <strong>Практическое правило</strong>
+        Запускайте <code>ari pair</code> только непосредственно перед подключением,
+        не публикуйте код и убедитесь, что connector завершил commissioning. При сомнении
+        откройте новое окно: оно автоматически отменит предыдущее.
+      </div>
+    </section>
+
+    <section id="faq">
+      <p class="eyebrow">Короткие ответы</p>
+      <h2>Частые вопросы</h2>
+
+      <details>
+        <summary>Почему нельзя просто довериться первому TLS-сертификату?</summary>
+        <p>Это был бы классический TOFU. Он надёжен после первого соединения, но именно первое соединение уязвимо для постоянной фиксации сертификата MITM. PAKE даёт независимое доказательство через pairing-код.</p>
+      </details>
+      <details>
+        <summary>Зачем вообще TLS до завершения pairing?</summary>
+        <p>TLS сразу шифрует транспорт и унифицирует QUIC/WSS. Но в первом сеансе сертификат ещё не считается identity relay: окончательное доверие к нему появляется только после OPAQUE и проверки MAC.</p>
+      </details>
+      <details>
+        <summary>Зачем закрывать первое TLS-соединение?</summary>
+        <p>Чтобы не продолжать рабочую сессию внутри канала, который изначально мог завершаться на MITM. Новый сеанс разрешён только сертификату с отпечатком, аутентифицированным через PAKE.</p>
+      </details>
+      <details>
+        <summary>Почему восьми цифр достаточно?</summary>
+        <p>Сами по себе восемь цифр — слабый постоянный пароль. Здесь код короткоживущий, одноразовый, допускает лишь несколько online-попыток, а OPAQUE не отдаёт перехватчику удобный материал для offline-перебора.</p>
+      </details>
+      <details>
+        <summary>Дефис в pairing-коде обязателен?</summary>
+        <p>Нет. <code>ari pair</code> печатает <code>12345678</code>, а connector принимает и <code>12345678</code>, и <code>1234-5678</code>.</p>
+      </details>
+      <details>
+        <summary>Что делать после смены TLS-сертификата relay?</summary>
+        <p>Открыть новое окно командой <code>ari pair</code> и повторить commissioning. Без явного действия connector отвергнет изменившийся pin.</p>
+      </details>
+      <details>
+        <summary>Pairing нужен при подключении через SSH tunnel?</summary>
+        <p>Нет. В режиме <code>--relay-ssh</code> identity удалённой стороны уже проверяется системным OpenSSH, поэтому второй механизм знакомства был бы избыточен.</p>
+      </details>
+      <details>
+        <summary>При чём здесь Matter?</summary>
+        <p>Взята та же понятная жизненная модель: короткий код, ограниченное окно commissioning, PAKE и закрепление долговременной identity. Конкретный PAKE Ariadne — OPAQUE по RFC 9807.</p>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <strong>Ariadne wire protocol v1.</strong>
+      Эта страница объясняет текущую реализацию человеческим языком. Точные названия
+      сообщений и технический контракт находятся в <a href="protocol.md">docs/protocol.md</a>.
+    </div>
+  </footer>
+</body>
+</html>
