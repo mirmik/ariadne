@@ -70,6 +70,14 @@ jobs:
             goarch: amd64
             asset: ariadne-mcp-windows-amd64.exe
             package: ./cmd/ariadne-mcp
+          - goos: linux
+            goarch: amd64
+            asset: ariadne-relay-linux-amd64
+            package: ./cmd/ariadne-relay
+          - goos: linux
+            goarch: arm64
+            asset: ariadne-relay-linux-arm64
+            package: ./cmd/ariadne-relay
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
