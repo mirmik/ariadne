@@ -6,7 +6,7 @@ require (
 	github.com/bytemare/opaque v0.18.0
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
-	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/quic-go v0.62.0
 	golang.org/x/crypto v0.56.0
 	golang.org/x/term v0.45.0
 )
@@ -31,6 +31,6 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/time v0.15.0
 )
