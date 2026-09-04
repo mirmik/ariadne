@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	ProtocolVersion       = 1
+	ProtocolVersion       = 2
 	MaxControlMessageSize = 4 << 20
 	MaxExecOutputBytes    = 1 << 20
 	MaxStreamPayloadSize  = 64 << 10
@@ -329,7 +329,7 @@ func requireJSONEOF(decoder *json.Decoder) error {
 
 func RegistrationTranscript(nonce []byte, hello Hello) []byte {
 	transcript := make([]byte, 0, 256)
-	transcript = append(transcript, "ariadne/register/v1"...)
+	transcript = append(transcript, "ariadne/register/v2"...)
 	transcript = appendField(transcript, nonce)
 	transcript = appendField(transcript, []byte(hello.NodeID))
 	transcript = appendField(transcript, []byte(hello.Alias))
@@ -338,6 +338,12 @@ func RegistrationTranscript(nonce []byte, hello Hello) []byte {
 	transcript = appendField(transcript, []byte(hello.Platform))
 	transcript = appendField(transcript, []byte(hello.Architecture))
 	transcript = appendField(transcript, []byte(hello.ConnectorVersion))
+	// Sign the ordered list, including its length. Nil and empty both encode
+	// zero capabilities; reordering or adding an entry changes the signature.
+	transcript = binary.BigEndian.AppendUint32(transcript, uint32(len(hello.Capabilities)))
+	for _, capability := range hello.Capabilities {
+		transcript = appendField(transcript, []byte(capability))
+	}
 	return transcript
 }
 

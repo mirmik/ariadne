@@ -31,10 +31,12 @@ type nodeSession struct {
 	pendingMu   sync.Mutex
 	pending     map[string]chan wire.ExecResult
 	pendingJobs map[string]chan wire.JobResponse
+	lateExec    recentIDs
+	lateJobs    recentIDs
 
 	streamsMu sync.RWMutex
 	streams   map[string]*relayStream
-	known     map[string]struct{}
+	known     recentIDs
 }
 
 func (session *nodeSession) nodeInfo() wire.NodeInfo {
@@ -59,7 +61,6 @@ func newNodeSession(server *Server, connection messageconn.Conn, info wire.NodeI
 		pending:     make(map[string]chan wire.ExecResult),
 		pendingJobs: make(map[string]chan wire.JobResponse),
 		streams:     make(map[string]*relayStream),
-		known:       make(map[string]struct{}),
 	}
 }
 
@@ -115,8 +116,12 @@ func (session *nodeSession) handleControl(envelope wire.Envelope) error {
 		if resultChannel != nil {
 			delete(session.pending, envelope.ID)
 		}
+		late := session.lateExec.contains(envelope.ID)
 		session.pendingMu.Unlock()
 		if resultChannel == nil {
+			if late {
+				return nil
+			}
 			return fmt.Errorf("connector sent an unsolicited exec result for request %s", envelope.ID)
 		}
 		select {
@@ -138,8 +143,12 @@ func (session *nodeSession) handleControl(envelope wire.Envelope) error {
 		if responseChannel != nil {
 			delete(session.pendingJobs, envelope.ID)
 		}
+		late := session.lateJobs.contains(envelope.ID)
 		session.pendingMu.Unlock()
 		if responseChannel == nil {
+			if late {
+				return nil
+			}
 			return fmt.Errorf("connector sent an unsolicited job response for request %s", envelope.ID)
 		}
 		select {
@@ -202,6 +211,9 @@ func (session *nodeSession) exec(ctx context.Context, request wire.ExecRequest) 
 	session.pendingMu.Unlock()
 	defer func() {
 		session.pendingMu.Lock()
+		if session.pending[requestID] != nil {
+			session.lateExec.add(requestID)
+		}
 		delete(session.pending, requestID)
 		session.pendingMu.Unlock()
 	}()
@@ -239,6 +251,9 @@ func (session *nodeSession) job(ctx context.Context, request wire.JobRequest) (w
 	session.pendingMu.Unlock()
 	defer func() {
 		session.pendingMu.Lock()
+		if session.pendingJobs[requestID] != nil {
+			session.lateJobs.add(requestID)
+		}
 		delete(session.pendingJobs, requestID)
 		session.pendingMu.Unlock()
 	}()
@@ -305,7 +320,6 @@ func (session *nodeSession) addStream(stream *relayStream) error {
 		return errors.New("stream ID collision")
 	}
 	session.streams[stream.id] = stream
-	session.known[stream.id] = struct{}{}
 	return nil
 }
 
@@ -313,6 +327,7 @@ func (session *nodeSession) removeStream(stream *relayStream) {
 	session.streamsMu.Lock()
 	if session.streams[stream.id] == stream {
 		delete(session.streams, stream.id)
+		session.known.add(stream.id)
 	}
 	session.streamsMu.Unlock()
 }
@@ -326,8 +341,7 @@ func (session *nodeSession) stream(id string) *relayStream {
 func (session *nodeSession) knownStream(id string) bool {
 	session.streamsMu.RLock()
 	defer session.streamsMu.RUnlock()
-	_, known := session.known[id]
-	return known
+	return session.known.contains(id)
 }
 
 func (session *nodeSession) close(reason error) {

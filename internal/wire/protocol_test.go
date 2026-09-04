@@ -3,6 +3,7 @@ package wire
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -30,8 +31,8 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 
 func TestDecodeEnvelopeRejectsUnknownAndTrailingFields(t *testing.T) {
 	tests := []string{
-		`{"version":1,"type":"exec.request","unknown":true}`,
-		`{"version":1,"type":"exec.request"} {}`,
+		`{"version":2,"type":"exec.request","unknown":true}`,
+		`{"version":2,"type":"exec.request"} {}`,
 		`{"version":99,"type":"exec.request"}`,
 	}
 	for _, input := range tests {
@@ -62,9 +63,41 @@ func TestDecodePayloadRejectsUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = DecodePayload[ExecRequest](Envelope{Version: 1, Type: MessageExecRequest, Payload: payload})
+	_, err = DecodePayload[ExecRequest](Envelope{Version: ProtocolVersion, Type: MessageExecRequest, Payload: payload})
 	if err == nil {
 		t.Fatal("DecodePayload accepted an unknown field")
+	}
+}
+
+func TestLegacyProtocolRejected(t *testing.T) {
+	if _, err := DecodeEnvelope([]byte(`{"version":1,"type":"connector.hello","payload":{}}`)); err == nil || !strings.Contains(err.Error(), "unsupported protocol version 1") {
+		t.Fatalf("legacy hello error = %v", err)
+	}
+	frame, err := EncodeStreamFrame("00112233445566778899aabbccddeeff", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame[0] = 1
+	if _, _, err := DecodeStreamFrame(frame); err == nil {
+		t.Fatal("accepted legacy stream framing")
+	}
+}
+
+func TestRegistrationCapabilitiesEncoding(t *testing.T) {
+	nonce := bytes.Repeat([]byte{1}, 32)
+	hello := Hello{}
+	empty := RegistrationTranscript(nonce, hello)
+	hello.Capabilities = []string{}
+	if !bytes.Equal(empty, RegistrationTranscript(nonce, hello)) {
+		t.Fatal("nil and empty capabilities differ")
+	}
+	hello.Capabilities = []string{"a", "bc"}
+	original := RegistrationTranscript(nonce, hello)
+	for _, changed := range [][]string{{"bc", "a"}, {"ab", "c"}, {"a"}, {"a", "bc", "d"}} {
+		hello.Capabilities = changed
+		if bytes.Equal(original, RegistrationTranscript(nonce, hello)) {
+			t.Fatalf("capabilities not bound: %v", changed)
+		}
 	}
 }
 

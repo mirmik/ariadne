@@ -260,8 +260,11 @@ func (connector *Connector) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if registered.Node.ID != hello.NodeID || registered.Node.Alias != hello.Alias || registered.Node.SSHHostKey != hello.SSHHostKey {
+	if registered.Node.ID != hello.NodeID || registered.Node.SSHHostKey != hello.SSHHostKey {
 		return errors.New("relay registered a different node identity")
+	}
+	if !wire.ValidAlias(registered.Node.Alias) || (!registered.Node.AliasClaimed && registered.Node.Alias != hello.Alias) {
+		return errors.New("relay registered an invalid node alias")
 	}
 	cancelHandshake()
 

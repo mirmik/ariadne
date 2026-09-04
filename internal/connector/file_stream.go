@@ -100,6 +100,9 @@ func (stream *localStream) runFileDownload() error {
 	for {
 		count, readErr := file.Read(buffer)
 		if count > 0 {
+			if int64(count) > stream.session.connector.config.MaxFileBytes-size {
+				return stream.finishFileTransfer(wire.FileTransferResult{Size: size, Error: "file exceeds connector size limit"})
+			}
 			size += int64(count)
 			_, _ = hash.Write(buffer[:count])
 			frame, encodeErr := wire.EncodeFileData(buffer[:count])

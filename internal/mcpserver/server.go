@@ -207,7 +207,7 @@ func New(api API, version string) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "ariadne_revoke",
 		Title:       "Revoke Ariadne node identity",
-		Description: "Permanently reject an exact enrolled node identity and release its claimed alias. This disconnects the node immediately and requires a new connector identity to reconnect.",
+		Description: "Permanently reject an exact enrolled node identity and release its claimed alias. This disconnects the node immediately and requires a new connector identity to reconnect. Background jobs may continue running; cancel them before revoking if they must stop. Revocation is not confirmation that remote processes stopped.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, IdempotentHint: true, OpenWorldHint: boolPointer(false), DestructiveHint: boolPointer(true)},
 	}, h.revoke)
 	mcp.AddTool(server, &mcp.Tool{

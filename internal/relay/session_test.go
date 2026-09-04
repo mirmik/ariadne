@@ -14,7 +14,6 @@ func TestNodeSessionRejectsUnsolicitedMessages(t *testing.T) {
 	session := &nodeSession{
 		pending: make(map[string]chan wire.ExecResult),
 		streams: make(map[string]*relayStream),
-		known:   make(map[string]struct{}),
 	}
 
 	execResult := testEnvelope(t, wire.MessageExecResult, "unknown-request", wire.ExecResult{ExitCode: 0})

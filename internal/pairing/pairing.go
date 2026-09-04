@@ -148,8 +148,8 @@ func (session *ServerSession) Finish(encodedKE3 []byte, relayPin string) (string
 	if err := session.server.LoginFinish(ke3, session.output.ClientMAC); err != nil {
 		return "", errors.New("pairing code authentication failed")
 	}
-	if !session.window.consume(session.generation) {
-		return "", ErrConsumed
+	if err := session.window.consume(session.generation, time.Now()); err != nil {
+		return "", err
 	}
 	return bindingMAC(session.output.SessionSecret, session.nodeID, pin), nil
 }
@@ -218,14 +218,18 @@ func VerifyBinding(sessionSecret []byte, nodeID, relayPin, encodedMAC string) er
 	return nil
 }
 
-func (window *Window) consume(generation uint64) bool {
+func (window *Window) consume(generation uint64, now time.Time) error {
 	window.mu.Lock()
 	defer window.mu.Unlock()
 	if window.active == nil || window.generation != generation {
-		return false
+		return ErrConsumed
+	}
+	if !now.Before(window.active.expiresAt) {
+		window.active = nil
+		return ErrExpired
 	}
 	window.active = nil
-	return true
+	return nil
 }
 
 func configuration() *opaque.Configuration {

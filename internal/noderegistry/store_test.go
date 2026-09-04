@@ -1,12 +1,143 @@
 package noderegistry
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestRegistryBoundsAnonymousIdentitiesAndRestarts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, id := range []string{"claimed", "revoked"} {
+		if _, err := store.Observe(Observation{NodeID: id, PublicKey: id}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Claim("claimed", "phone", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Revoke("revoked", now); err != nil {
+		t.Fatal(err)
+	}
+	for i := range MaxUnclaimedNodes {
+		id := fmt.Sprintf("anonymous-%d", i)
+		if _, err := store.Observe(Observation{NodeID: id, PublicKey: id}, now.Add(time.Duration(i+1)*time.Second)); err != nil {
+			t.Fatalf("observation %d: %v", i, err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 10 {
+		id := fmt.Sprintf("excess-%d", i)
+		if _, err := store.Observe(Observation{NodeID: id, PublicKey: id}, now.Add(time.Hour)); !errors.Is(err, ErrCapacity) {
+			t.Fatalf("quota error: %v", err)
+		}
+	}
+	for filename, want := range map[string][]byte{path: before, path + ".bak": backup} {
+		got, err := os.ReadFile(filename)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("rejection changed %s: %v", filename, err)
+		}
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopened.state.Nodes) != MaxUnclaimedNodes+2 || reopened.Claims()["claimed"] != "phone" {
+		t.Fatal("lost identities or claim")
+	}
+	if _, err := reopened.Observe(Observation{NodeID: "revoked", PublicKey: "revoked"}, now); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("revocation lost: %v", err)
+	}
+	if _, err := reopened.Claim("anonymous-0", "new-phone", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.Observe(Observation{NodeID: "new-node", PublicKey: "new-key"}, now); err != nil {
+		t.Fatalf("claim did not free an unclaimed slot: %v", err)
+	}
+}
+
+func TestRegistryRateLimitsExistingIdentityRewrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	observation := Observation{NodeID: "node", PublicKey: "key"}
+	for range 16 {
+		if _, err := store.Observe(observation, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Observe(observation, now); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("rate error = %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("rate rejection changed registry")
+	}
+	if _, err := store.Claim("node", "phone", now); err != nil {
+		t.Fatalf("rate limiter blocked management: %v", err)
+	}
+	if _, err := store.Observe(observation, now.Add(time.Second)); err != nil {
+		t.Fatalf("registration budget did not refill: %v", err)
+	}
+}
+
+func TestOversizeCommitPreservesPrimaryAndBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := store.Observe(Observation{NodeID: "node", PublicKey: "key"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Claim("node", "phone", now); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	backup, _ := os.ReadFile(path + ".bak")
+	next := cloneState(store.state)
+	next.Nodes["huge"] = Record{NodeID: "huge", PublicKey: strings.Repeat("x", maxStateSize)}
+	if err := store.commit(next); err == nil {
+		t.Fatal("oversized state accepted")
+	}
+	for filename, want := range map[string][]byte{path: before, path + ".bak": backup} {
+		got, err := os.ReadFile(filename)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("failed commit changed %s: %v", filename, err)
+		}
+	}
+	if _, found := store.state.Nodes["huge"]; found {
+		t.Fatal("failed commit published in-memory state")
+	}
+	if _, err := Open(path); err != nil {
+		t.Fatalf("cannot restart: %v", err)
+	}
+}
 
 func TestRegistryPersistsClaimRenameAndRevocation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ariadne", "registry.json")

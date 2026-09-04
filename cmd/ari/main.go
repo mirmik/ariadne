@@ -39,6 +39,7 @@ func run(arguments []string) int {
 	relaySSH := flags.String("relay-ssh", "", "reach management plane through OpenSSH (user@host or user@host:port)")
 	managementTokenPath := flags.String("management-token-file", defaultManagementTokenPath, "management bearer token file")
 	allowInsecureRelay := flags.Bool("allow-insecure-relay", false, "allow plaintext relay outside loopback")
+	maxDownloadBytes := flags.Int64("max-download-size", client.DefaultMaxDownloadBytes, "maximum received file size in bytes")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	flags.Usage = usage
 	if err := flags.Parse(arguments); err != nil {
@@ -75,7 +76,7 @@ func run(arguments []string) int {
 		fmt.Fprintln(os.Stderr, "ari:", err)
 		return 2
 	}
-	apiClient, err := client.New(client.Config{RelayURL: *relayURL, ManagementToken: managementToken})
+	apiClient, err := client.New(client.Config{RelayURL: *relayURL, ManagementToken: managementToken, MaxDownloadBytes: *maxDownloadBytes})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ari:", err)
 		return 2
@@ -345,7 +346,7 @@ func runRevoke(ctx context.Context, apiClient *client.Client, arguments []string
 	if err := apiClient.Revoke(ctx, arguments[0]); err != nil {
 		return err
 	}
-	fmt.Printf("revoked %s\n", arguments[0])
+	fmt.Printf("revoked %s; background jobs may still be running\n", arguments[0])
 	return nil
 }
 
@@ -458,5 +459,6 @@ func usage() {
 
 Global flags must appear before the command. Use --relay-ssh breakglass@HOST
 for the private management plane, or "ari proxy %h" as an OpenSSH
-ProxyCommand.`)
+ProxyCommand. --max-download-size BYTES sets the local receive limit
+(default 1073741824 bytes; zero uses the default).`)
 }

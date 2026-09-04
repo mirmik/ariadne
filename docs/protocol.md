@@ -1,6 +1,10 @@
-# Ariadne wire protocol v1
+# Ariadne wire protocol v2
 
-Это описание текущего экспериментального протокола. Совместимость между версиями пока не обещается.
+Это описание текущего экспериментального протокола. Версия 2 добавляет capabilities
+в подписываемый registration transcript. Relay и connector необходимо обновить
+совместно: версия 1 явно отклоняется, fallback на старую подпись отсутствует.
+Сохранённые node identity, registry и certificate pins не меняются; повторное
+сопряжение не требуется. Версии HTTP endpoints и прикладных capabilities остаются `v1`.
 
 ## Transport и endpoints
 
@@ -8,7 +12,7 @@ Node plane рекомендует отдельный порт `14771`. Для к
 connector одновременно пробует фиксированный набор `14771`, `23771`, `47471`;
 последний сохранён для совместимости. Доступны два совместимых транспорта:
 
-- QUIC/TLS 1.3 с ALPN `ariadne/1` на UDP;
+- QUIC/TLS 1.3 с ALPN `ariadne/2` на UDP;
 - `GET /v1/connect` — постоянный WebSocket connector → relay на TCP;
 - `GET /healthz` — health endpoint TCP listener.
 
@@ -40,6 +44,8 @@ plane. Relay генерирует равномерный восьмизначн�
 OPAQUE record (RFC 9807), удаляет исходный код из своего состояния и возвращает
 его оператору. По умолчанию record живёт пять минут и допускает пять login
 попыток. Новый запрос `ari pair` заменяет предыдущее окно.
+Срок проверяется также при атомарном завершении: KE3 на границе expiry или позже
+отклоняется, даже если KE1 был получен вовремя.
 
 Первый TLS-сеанс проверяет только наличие сертификата и TLS 1.3; доверие к
 предъявленному сертификату ещё не устанавливается. Внутри него выполняется:
@@ -90,29 +96,47 @@ Control-сообщения являются текстовыми messages с env
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "type": "connector.hello",
   "id": "optional-request-id",
   "payload": {}
 }
 ```
 
-В WSS message boundaries задаёт WebSocket. В QUIC v1 connector открывает один
+В WSS message boundaries задаёт WebSocket. В QUIC transport connector открывает один
 bidirectional control stream; поверх него message кодируется как `type: u8`,
 `length: u32 big-endian`, `payload`. Типы `1` и `2` соответствуют text и binary,
 а `3`/`4` — ping/pong. Лимит одного message — 4 MiB. Вложенные shell/SSH
 потоки пока используют тот же application-level stream ID framing, поэтому
-переезд транспорта не меняет semantics wire v1. Нативные QUIC streams можно
+переезд транспорта не меняет semantics wire v2. Нативные QUIC streams можно
 добавить следующей версией протокола без изменения регистрации.
 
 Handshake:
 
-1. Connector отправляет `connector.hello`: `node_id`, alias, Ed25519 public key, встроенный SSH host key, platform, architecture и версию.
+1. Connector отправляет `connector.hello`: `node_id`, alias, Ed25519 public key, встроенный SSH host key, platform, architecture, версию и capabilities.
 2. Relay проверяет, что `node_id` получен из public key, и отвечает случайным `relay.challenge`.
 3. Connector подписывает domain-separated transcript, включающий challenge и все поля hello, и отправляет `connector.register`.
 4. Relay проверяет Ed25519 signature, регистрирует live identity и отвечает `relay.registered`.
 
 Приватный ключ никогда не покидает узел. Challenge не даёт повторно воспроизвести перехваченную регистрацию. `ssh_host_key` входит в подписываемый transcript: relay не принимает его замену без новой корректной подписи node identity.
+
+Transcript начинается с domain label `ariadne/register/v2`; каждое строковое
+поле и nonce имеют префикс длины u32 big-endian. После ConnectorVersion идут
+число capabilities u32 big-endian и элементы с такими же префиксами длины.
+Порядок списка значим для подписи; nil и пустой список эквивалентны.
+В `relay.registered` alias может отличаться от hello только при `alias_claimed: true`;
+NodeID и SSHHostKey connector всегда сверяет точно.
+
+Публичная регистрация сохраняет не более 1024 неподтверждённых и неотозванных
+identities. При исчерпании квоты новые identities отвергаются; существующие
+claimed/revoked записи автоматически не удаляются. Claim освобождает слот
+неподтверждённой identity. Перезаписи через Observe ограничены общей скоростью
+4 в секунду с burst 16, включая повторные регистрации ранее известных ключей;
+claim/revoke не расходуют этот бюджет. Сериализованный registry ограничен 16 MiB
+до изменения primary или backup. Эти лимиты ограничивают расход ресурсов,
+но не являются admission control и не гарантируют доступность при заполнении
+публичной квоты посторонними клиентами. Старые registry загружаются как прежде;
+если unclaimed-записей уже больше квоты, добавление новых запрещено.
 
 SSH host key стабильно выводится из seed node identity через отдельный HMAC-SHA-256 domain label `ariadne/ssh-host/v1`. Это даёт стабильность после reconnect и одновременно не переиспользует один Ed25519 private key в двух протоколах.
 
@@ -151,13 +175,27 @@ Management plane открывает `streams/file-upload` или `streams/file-d
 
 Текущая версия передаёт обычные regular files целиком. Resume, каталоги и delta transfer оставлены последующим расширениям.
 
+Connector проверяет MaxFileBytes до каждой отправки data chunk, включая рост
+файла после первоначального stat. Приёмник CLI/MCP независимо ограничивает
+полный download 1 GiB по умолчанию и проверяет размер до записи очередного chunk.
+Предел задаётся при запуске `ari` или `ariadne-mcp` флагом `--max-download-size BYTES`
+(у `ari` перед командой); ноль выбирает default, отрицательные значения запрещены.
+Повышение лимита приёмника не повышает лимит connector. При ошибке/отмене
+временный файл удаляется, существующий destination остаётся целым.
+
 ## Фоновые задачи
 
 Узел с capability `background-jobs.v1` принимает control-сообщения `job.request` и отвечает `job.response`. `start` использует ту же высокоуровневую форму `command`/`argv`, `shell`, `cwd` и необязательный runtime timeout, что и exec, но relay ждёт только запуска процесса. Connector назначает случайный job ID и хранит реестр независимо от конкретной транспортной сессии.
 
 Доступны действия `list`, `status`, `read`, `cancel` и `remove`. `read` принимает независимые `stdout_offset` и `stderr_offset` и возвращает ограниченные фрагменты, следующие offsets и EOF для каждого потока. Connector пишет stdout и stderr в закрытые spool-файлы с отдельными лимитами; при достижении лимита процесс продолжает работать, а результат получает признак truncation. Завершённые записи удаляются по retention и ограничению количества.
 
-Разрыв WSS/QUIC не отменяет процесс: после reconnect той же connector identity management-клиент продолжает обращаться по прежнему job ID. Жизненный цикл заканчивается вместе с процессом connector; v1 не восстанавливает job registry и spool после его перезапуска и не является offline-очередью relay.
+Разрыв WSS/QUIC не отменяет процесс: после reconnect той же connector identity management-клиент продолжает обращаться по прежнему job ID. Жизненный цикл заканчивается вместе с процессом connector; текущая версия не восстанавливает job registry и spool после его перезапуска и не является offline-очередью relay.
+
+Отзыв identity также не отменяет фоновые jobs: `revoke` запрещает дальнейший
+доступ и разрывает transport, но не подтверждает остановку удалённых процессов.
+Если jobs должны остановиться, их нужно отменить до revoke; при недоступном
+узле остановка требует локального вмешательства. CLI и описание MCP tool
+явно сообщают об этой семантике.
 
 ## Встроенный SSH shell
 
@@ -179,19 +217,27 @@ Management plane открывает `streams/file-upload` или `streams/file-d
 После `stream.opened` данные передаются бинарными messages по постоянному connector-соединению:
 
 ```text
-byte 0       protocol version (1)
-byte 1       flags (0 in v1)
+byte 0       protocol version (2)
+byte 1       flags (0 in v2)
 bytes 2..17  raw 128-bit stream ID
 bytes 18..   opaque stream payload, at most 64 KiB
 ```
 
 Сообщения `stream.close` и `stream.error` управляют жизненным циклом. Несколько SSH-сессий используют одно connector-соединение и различаются stream ID.
 
-Connector является строго реактивной стороной после регистрации. `exec.result` и `job.response` принимаются только для существующего relay request ID, а stream state и бинарные frames — только для stream ID, ранее созданного management plane. Фоновые процессы могут продолжать работу без активной relay-сессии, но connector никогда сам не отправляет их вывод: management plane должен запросить его после reconnect. Unsolicited result или никогда не выдававшийся relay stream ID считаются нарушением протокола и закрывают node connection; запоздалые frames уже закрытого, но ранее выданного stream безопасно отбрасываются.
+Connector является строго реактивной стороной после регистрации. `exec.result` и
+`job.response` доставляются только ожидающему запросу своего типа; поздние ответы
+на последние 4096 завершившихся без ответа запросов каждого типа отбрасываются.
+Stream state и бинарные frames относятся к активному stream или отбрасываются
+для последних 4096 закрытых streams. Истории независимы, ограничены и принадлежат
+конкретной node-сессии. Сообщения для никогда не выдававшихся либо уже вытесненных
+из истории IDs считаются нарушением протокола и закрывают node connection.
+Фоновые процессы не отправляют вывод сами: management plane должен запросить
+его после reconnect.
 
 Клиентский WebSocket содержит только payload bytes без внутреннего заголовка. `ari shell` передаёт его встроенному Go SSH client, а `ari proxy` преобразует в обычный stdin/stdout byte-stream для OpenSSH `ProxyCommand`.
 
-## Неизменяемые ограничения v1
+## Ограничения v2
 
 - control message не превышает 4 MiB;
 - stream payload не превышает 64 KiB;

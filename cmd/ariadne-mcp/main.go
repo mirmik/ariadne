@@ -33,6 +33,7 @@ func run(arguments []string) error {
 	relayURL := flags.String("relay", "http://127.0.0.1:8088", "management-plane relay base URL")
 	managementTokenPath := flags.String("management-token-file", defaultTokenPath, "management bearer token file")
 	allowInsecureRelay := flags.Bool("allow-insecure-relay", false, "allow plaintext relay outside loopback")
+	maxDownloadBytes := flags.Int64("max-download-size", client.DefaultMaxDownloadBytes, "maximum received file size in bytes")
 	showVersion := flags.Bool("version", false, "print version and exit")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -51,7 +52,7 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	apiClient, err := client.New(client.Config{RelayURL: *relayURL, ManagementToken: managementToken})
+	apiClient, err := client.New(client.Config{RelayURL: *relayURL, ManagementToken: managementToken, MaxDownloadBytes: *maxDownloadBytes})
 	if err != nil {
 		return err
 	}

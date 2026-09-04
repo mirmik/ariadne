@@ -9,7 +9,7 @@ import (
 const testRelayPin = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestPairingEstablishesAuthenticatedRelayPinAndIsOneTime(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
+	now := time.Now()
 	var window Window
 	opening, err := window.Open(now, time.Minute, 3)
 	if err != nil {

@@ -11,14 +11,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 const (
 	stateVersion = 1
 	maxStateSize = 16 << 20
+	// Public registration must not consume unbounded persistent storage.
+	MaxUnclaimedNodes = 1024
 )
 
 var ErrRevoked = errors.New("node identity is revoked")
+var ErrCapacity = errors.New("unclaimed node registry capacity reached")
+var ErrRateLimited = errors.New("node registration rate limit reached")
 
 type Record struct {
 	NodeID           string     `json:"node_id"`
@@ -50,9 +56,10 @@ type stateFile struct {
 }
 
 type Store struct {
-	path  string
-	mu    sync.Mutex
-	state stateFile
+	path         string
+	mu           sync.Mutex
+	state        stateFile
+	observations *rate.Limiter
 }
 
 func DefaultPath() (string, error) {
@@ -64,7 +71,7 @@ func DefaultPath() (string, error) {
 }
 
 func Open(path string) (*Store, error) {
-	store := &Store{path: path, state: stateFile{Version: stateVersion, Nodes: make(map[string]Record)}}
+	store := &Store{path: path, state: stateFile{Version: stateVersion, Nodes: make(map[string]Record)}, observations: rate.NewLimiter(4, 16)}
 	if path == "" {
 		return store, nil
 	}
@@ -119,7 +126,21 @@ func (store *Store) Observe(observation Observation, now time.Time) (Record, err
 		return Record{}, ErrRevoked
 	}
 	if !found {
+		unclaimed := 0
+		for _, candidate := range store.state.Nodes {
+			if candidate.ClaimedAlias == "" && candidate.RevokedAt == nil {
+				unclaimed++
+			}
+		}
+		if unclaimed >= MaxUnclaimedNodes {
+			return Record{}, ErrCapacity
+		}
 		record = Record{NodeID: observation.NodeID, PublicKey: observation.PublicKey, CreatedAt: now}
+	}
+	// Bound rewrites even when an attacker reuses previously admitted keys.
+	// Administrative claim/revoke operations do not consume this budget.
+	if !store.observations.AllowN(now, 1) {
+		return Record{}, ErrRateLimited
 	}
 	record.ReportedAlias = observation.ReportedAlias
 	record.SSHHostKey = observation.SSHHostKey
@@ -183,6 +204,10 @@ func (store *Store) Revoke(target string, now time.Time) (Record, error) {
 }
 
 func (store *Store) commit(next stateFile) error {
+	encoded, err := encodeState(next)
+	if err != nil {
+		return err
+	}
 	if store.path != "" {
 		_, inspectErr := inspect(store.path)
 		if inspectErr == nil {
@@ -196,10 +221,6 @@ func (store *Store) commit(next stateFile) error {
 		} else if !errors.Is(inspectErr, os.ErrNotExist) {
 			return inspectErr
 		}
-		encoded, err := encodeState(next)
-		if err != nil {
-			return err
-		}
 		if err := writeAtomic(store.path, encoded); err != nil {
 			return fmt.Errorf("write node registry: %w", err)
 		}
@@ -212,6 +233,9 @@ func encodeState(state stateFile) ([]byte, error) {
 	encoded, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode node registry: %w", err)
+	}
+	if len(encoded) >= maxStateSize {
+		return nil, errors.New("node registry exceeds maximum serialized size")
 	}
 	return append(encoded, '\n'), nil
 }

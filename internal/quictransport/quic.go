@@ -15,7 +15,7 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
-const ALPN = "ariadne/1"
+const ALPN = "ariadne/2"
 
 const closeCode quic.ApplicationErrorCode = 0x100
 

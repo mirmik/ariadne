@@ -21,16 +21,20 @@ import (
 	"github.com/mirmik/ariadne/internal/wire"
 )
 
+const DefaultMaxDownloadBytes int64 = 1 << 30
+
 type Config struct {
-	RelayURL        string
-	ManagementToken string
-	HTTPClient      *http.Client
+	RelayURL         string
+	ManagementToken  string
+	HTTPClient       *http.Client
+	MaxDownloadBytes int64
 }
 
 type Client struct {
-	baseURL    *url.URL
-	httpClient *http.Client
-	token      string
+	baseURL          *url.URL
+	httpClient       *http.Client
+	token            string
+	maxDownloadBytes int64
 }
 
 type HTTPError struct {
@@ -48,6 +52,12 @@ func (err *HTTPError) Error() string {
 }
 
 func New(config Config) (*Client, error) {
+	if config.MaxDownloadBytes < 0 {
+		return nil, errors.New("maximum download size must be non-negative")
+	}
+	if config.MaxDownloadBytes == 0 {
+		config.MaxDownloadBytes = DefaultMaxDownloadBytes
+	}
 	baseURL, err := parseRelayURL(config.RelayURL)
 	if err != nil {
 		return nil, err
@@ -59,7 +69,7 @@ func New(config Config) (*Client, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{baseURL: baseURL, httpClient: httpClient, token: config.ManagementToken}, nil
+	return &Client{baseURL: baseURL, httpClient: httpClient, token: config.ManagementToken, maxDownloadBytes: config.MaxDownloadBytes}, nil
 }
 
 func (client *Client) Nodes(ctx context.Context) ([]wire.NodeInfo, error) {
@@ -360,6 +370,9 @@ func (client *Client) DownloadFile(ctx context.Context, target, remotePath, loca
 	hash := sha256.New()
 	localResult := wire.FileTransferResult{}
 	remoteResult, err := readFileResult(ctx, connection, func(data []byte) error {
+		if int64(len(data)) > client.maxDownloadBytes-localResult.Size {
+			return fmt.Errorf("download exceeds client size limit of %d bytes", client.maxDownloadBytes)
+		}
 		localResult.Size += int64(len(data))
 		_, _ = hash.Write(data)
 		if _, err := writer.Write(data); err != nil {
